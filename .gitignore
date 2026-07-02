@@ -23,6 +23,10 @@ dist/
 build/
 *.egg-info/
 
+# Node
+node_modules/
+admin-frontend/node_modules/
+
 # IDE
 .vscode/
 .idea/
@@ -30,3 +34,8 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Screenshots / design exports
+*.png
+*.jpg
+*.jpeg

@@ -1,29 +1,45 @@
+import os
+import secrets as _secrets
 from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Header
+
+from fastapi import APIRouter, Depends, HTTPException, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
-import os
 
 from app.database import get_db
 from app.models import User, PbiConfig, ModelChunk
-from app.security import encrypt_secret
+from app.security import encrypt_secret, issue_admin_jwt, verify_admin_jwt
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
+_bearer = HTTPBearer()
 
-def _require_admin(x_admin_token: str = Header(...), db: Session = Depends(get_db)):
-    """以 X-Admin-Token header 驗證管理員身份"""
-    admin = (
-        db.query(User)
-        .filter(User.mask_key_hash == x_admin_token, User.is_admin == True)
-        .first()
-    )
-    # 也接受環境變數的 bootstrap token，方便第一次初始化
+
+def _require_admin_jwt(
+    credentials: HTTPAuthorizationCredentials = Security(_bearer),
+) -> dict:
+    return verify_admin_jwt(credentials.credentials)
+
+
+# ── 管理員登入 ──────────────────────────────────────────────────────────────
+
+class AdminLoginRequest(BaseModel):
+    secret: str
+
+
+class AdminLoginResponse(BaseModel):
+    access_token: str
+    expires_in: int
+
+
+@router.post("/login", response_model=AdminLoginResponse)
+def admin_login(body: AdminLoginRequest):
     bootstrap = os.getenv("ADMIN_SECRET", "")
-    if x_admin_token != bootstrap and not admin:
-        raise HTTPException(status_code=403, detail="管理員驗證失敗")
-    return True
+    if not _secrets.compare_digest(body.secret, bootstrap):
+        raise HTTPException(status_code=401, detail="Invalid admin secret")
+    return AdminLoginResponse(access_token=issue_admin_jwt(), expires_in=3600)
 
 
 # ── 使用者管理 ─────────────────────────────────────────────────────────────
@@ -36,7 +52,7 @@ class ActivateRequest(BaseModel):
 
 
 @router.get("/users")
-def list_users(_=Depends(_require_admin), db: Session = Depends(get_db)):
+def list_users(_=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
     users = db.query(User).all()
     return [
         {
@@ -53,7 +69,7 @@ def list_users(_=Depends(_require_admin), db: Session = Depends(get_db)):
 
 
 @router.patch("/users/activate")
-def activate_user(body: ActivateRequest, _=Depends(_require_admin), db: Session = Depends(get_db)):
+def activate_user(body: ActivateRequest, _=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == body.email).first()
     if not user:
         raise HTTPException(status_code=404, detail="找不到使用者")
@@ -88,7 +104,7 @@ class PbiConfigUpdate(BaseModel):
 
 
 @router.get("/pbi-configs")
-def list_pbi_configs(_=Depends(_require_admin), db: Session = Depends(get_db)):
+def list_pbi_configs(_=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
     configs = db.query(PbiConfig).all()
     return [
         {
@@ -105,7 +121,7 @@ def list_pbi_configs(_=Depends(_require_admin), db: Session = Depends(get_db)):
 
 
 @router.post("/pbi-configs", status_code=201)
-def create_pbi_config(body: PbiConfigCreate, _=Depends(_require_admin), db: Session = Depends(get_db)):
+def create_pbi_config(body: PbiConfigCreate, _=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
     if db.query(PbiConfig).filter(PbiConfig.name == body.name).first():
         raise HTTPException(status_code=409, detail="名稱已存在")
 
@@ -127,7 +143,7 @@ def create_pbi_config(body: PbiConfigCreate, _=Depends(_require_admin), db: Sess
 def update_pbi_config(
     config_id: str,
     body: PbiConfigUpdate,
-    _=Depends(_require_admin),
+    _=Depends(_require_admin_jwt),
     db: Session = Depends(get_db),
 ):
     config = db.query(PbiConfig).filter(PbiConfig.id == config_id).first()
@@ -158,7 +174,7 @@ class ModelUploadRequest(BaseModel):
 
 
 @router.post("/model/upload", status_code=201)
-def upload_model(body: ModelUploadRequest, _=Depends(_require_admin), db: Session = Depends(get_db)):
+def upload_model(body: ModelUploadRequest, _=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
     latest = (
         db.query(ModelChunk)
         .order_by(ModelChunk.model_version.desc())
@@ -177,7 +193,7 @@ def upload_model(body: ModelUploadRequest, _=Depends(_require_admin), db: Sessio
 
 
 @router.get("/model/versions")
-def list_model_versions(_=Depends(_require_admin), db: Session = Depends(get_db)):
+def list_model_versions(_=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
     chunks = db.query(ModelChunk).order_by(ModelChunk.model_version.desc()).all()
     return [
         {"model_version": c.model_version, "uploaded_at": c.uploaded_at}
