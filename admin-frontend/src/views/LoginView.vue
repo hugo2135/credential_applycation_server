@@ -41,7 +41,7 @@ async function handleLogin() {
   loading.value = true
   try {
     await auth.login(secret.value)
-    router.push('/users')
+    router.push('/admin/users')
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail ?? '登入失敗')
   } finally {

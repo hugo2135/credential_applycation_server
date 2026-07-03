@@ -59,6 +59,30 @@ def issue_admin_jwt() -> str:
     return jwt.encode(payload, _get_secret(), algorithm=JWT_ALGORITHM)
 
 
+def issue_user_jwt(user_id: str, email: str) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": user_id,
+        "email": email,
+        "role": "user",
+        "iss": "user-session",
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(hours=8)).timestamp()),
+    }
+    return jwt.encode(payload, _get_secret(), algorithm=JWT_ALGORITHM)
+
+
+def verify_user_jwt(token: str) -> dict:
+    try:
+        payload = jwt.decode(token, _get_secret(), algorithms=[JWT_ALGORITHM])
+    except JWTError as e:
+        logger.error("User JWT decode failed: %r", e)
+        raise HTTPException(status_code=401, detail="Session invalid or expired")
+    if payload.get("role") != "user" or payload.get("iss") != "user-session":
+        raise HTTPException(status_code=401, detail="Session invalid or expired")
+    return payload
+
+
 def verify_admin_jwt(token: str) -> dict:
     try:
         payload = jwt.decode(token, _get_secret(), algorithms=[JWT_ALGORITHM])

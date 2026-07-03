@@ -17,7 +17,7 @@ http.interceptors.response.use(
   (error) => {
     if (error.response?.status === 401) {
       useAuthStore().logout()
-      router.push('/login')
+      router.push('/admin/login')
     }
     return Promise.reject(error)
   },

@@ -11,15 +11,15 @@
         text-color="#ffffffa0"
         active-text-color="#ffffff"
       >
-        <el-menu-item index="/users">
+        <el-menu-item index="/admin/users">
           <el-icon><User /></el-icon>
           <span>使用者管理</span>
         </el-menu-item>
-        <el-menu-item index="/pbi-configs">
+        <el-menu-item index="/admin/pbi-configs">
           <el-icon><Setting /></el-icon>
           <span>PBI 設定</span>
         </el-menu-item>
-        <el-menu-item index="/model">
+        <el-menu-item index="/admin/model">
           <el-icon><Upload /></el-icon>
           <span>語意模型</span>
         </el-menu-item>
@@ -51,14 +51,14 @@ const router = useRouter()
 const auth = useAuthStore()
 
 const titleMap: Record<string, string> = {
-  '/users': '使用者管理',
-  '/pbi-configs': 'PBI 設定管理',
-  '/model': '語意模型管理',
+  '/admin/users': '使用者管理',
+  '/admin/pbi-configs': 'PBI 設定管理',
+  '/admin/model': '語意模型管理',
 }
 const pageTitle = computed(() => titleMap[route.path] ?? '')
 
 function handleLogout() {
   auth.logout()
-  router.push('/login')
+  router.push('/admin/login')
 }
 </script>
