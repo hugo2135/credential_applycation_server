@@ -5,14 +5,12 @@ import secrets
 import base64
 from datetime import datetime, timedelta, timezone
 
+import bcrypt
 from fastapi import HTTPException
 from jose import jwt, JWTError
-from passlib.context import CryptContext
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 logger = logging.getLogger(__name__)
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 JWT_ALGORITHM = "HS256"
 
@@ -22,11 +20,11 @@ def _get_secret() -> str:
 
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    return bcrypt.checkpw(plain.encode(), hashed.encode())
 
 
 def hash_mask_key(key: str) -> str:

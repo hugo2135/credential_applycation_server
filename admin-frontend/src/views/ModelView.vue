@@ -3,28 +3,56 @@
     <el-col :span="14">
       <el-card>
         <template #header>上傳新版語意模型</template>
-        <el-form label-position="top">
-          <el-form-item label="Relationships JSON">
+
+        <el-tabs v-model="inputMode">
+          <!-- 上傳檔案 -->
+          <el-tab-pane label="上傳檔案" name="file">
+            <el-upload
+              drag
+              accept=".json"
+              :auto-upload="false"
+              :limit="1"
+              :on-change="handleFileChange"
+              :on-remove="() => { fileContent = ''; fileName = '' }"
+              :file-list="fileList"
+            >
+              <el-icon style="font-size: 48px; color: #c0c4cc"><Upload /></el-icon>
+              <div style="margin-top: 8px; font-size: 14px; color: #606266">
+                拖曳 <b>.json</b> 檔案至此，或<em>點擊選擇</em>
+              </div>
+              <template #tip>
+                <div style="font-size: 12px; color: #909399; margin-top: 4px">
+                  支援原始 Power BI 格式（clientDataModel）或簡化語意格式
+                </div>
+              </template>
+            </el-upload>
+            <div v-if="fileName" style="margin-top: 8px; font-size: 13px; color: #67c23a">
+              ✓ 已選擇：{{ fileName }}
+            </div>
+          </el-tab-pane>
+
+          <!-- 貼上 JSON -->
+          <el-tab-pane label="貼上 JSON" name="text">
             <el-input
-              v-model="relationships"
+              v-model="rawJson"
               type="textarea"
-              :rows="10"
-              placeholder='{"tables": {...}}'
-              @input="parseError = ''"
+              :rows="16"
+              placeholder="貼上原始 PBI JSON（clientDataModel 格式或簡化語意格式皆可）"
+              style="font-family: monospace; font-size: 12px"
             />
-          </el-form-item>
-          <el-form-item label="Tables JSON（陣列）">
-            <el-input
-              v-model="tables"
-              type="textarea"
-              :rows="10"
-              placeholder='[{"name": "TableA", ...}]'
-              @input="parseError = ''"
-            />
-          </el-form-item>
-          <el-alert v-if="parseError" :title="parseError" type="error" show-icon :closable="false" style="margin-bottom: 12px" />
-          <el-button type="primary" :loading="uploading" @click="handleUpload">上傳</el-button>
-        </el-form>
+          </el-tab-pane>
+        </el-tabs>
+
+        <el-alert v-if="parseError" :title="parseError" type="error" show-icon :closable="false" style="margin: 12px 0 0" />
+
+        <el-button
+          type="primary"
+          :loading="uploading"
+          style="margin-top: 16px"
+          @click="handleUpload"
+        >
+          上傳
+        </el-button>
       </el-card>
     </el-col>
 
@@ -45,12 +73,16 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
+import type { UploadFile } from 'element-plus'
 import http from '@/api/http'
 
 interface Version { model_version: number; uploaded_at: string }
 
-const relationships = ref('')
-const tables = ref('')
+const inputMode = ref<'file' | 'text'>('file')
+const fileContent = ref('')
+const fileName = ref('')
+const fileList = ref<UploadFile[]>([])
+const rawJson = ref('')
 const parseError = ref('')
 const uploading = ref(false)
 const versions = ref<Version[]>([])
@@ -60,6 +92,50 @@ function fmtDate(d: string) {
   return new Date(d).toLocaleString()
 }
 
+function handleFileChange(file: UploadFile) {
+  const raw = file.raw
+  if (!raw) return
+  fileName.value = raw.name
+  const reader = new FileReader()
+  reader.onload = (e) => { fileContent.value = e.target?.result as string ?? '' }
+  reader.readAsText(raw, 'utf-8')
+}
+
+async function handleUpload() {
+  parseError.value = ''
+  const source = inputMode.value === 'file' ? fileContent.value : rawJson.value
+
+  if (!source.trim()) {
+    parseError.value = inputMode.value === 'file' ? '請先選擇 .json 檔案' : '請貼上 JSON 內容'
+    return
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(source)
+  } catch {
+    parseError.value = 'JSON 格式錯誤，請確認內容'
+    return
+  }
+
+  uploading.value = true
+  try {
+    const res = await http.post('/model/upload', parsed)
+    ElMessage.success(
+      `上傳成功 — 版本 ${res.data.model_version}（${res.data.table_count} 張表，${res.data.relationship_count} 個關聯）`
+    )
+    fileContent.value = ''
+    fileName.value = ''
+    fileList.value = []
+    rawJson.value = ''
+    await loadVersions()
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.detail ?? '上傳失敗')
+  } finally {
+    uploading.value = false
+  }
+}
+
 async function loadVersions() {
   loadingVersions.value = true
   try {
@@ -67,36 +143,6 @@ async function loadVersions() {
     versions.value = res.data
   } finally {
     loadingVersions.value = false
-  }
-}
-
-async function handleUpload() {
-  let parsedRel: object, parsedTables: unknown[]
-  try {
-    parsedRel = JSON.parse(relationships.value)
-  } catch {
-    parseError.value = 'Relationships JSON 格式錯誤'
-    return
-  }
-  try {
-    parsedTables = JSON.parse(tables.value)
-    if (!Array.isArray(parsedTables)) throw new Error()
-  } catch {
-    parseError.value = 'Tables JSON 格式錯誤（需為陣列）'
-    return
-  }
-
-  uploading.value = true
-  try {
-    const res = await http.post('/model/upload', { relationships: parsedRel, tables: parsedTables })
-    ElMessage.success(`上傳成功，版本 ${res.data.model_version}`)
-    relationships.value = ''
-    tables.value = ''
-    await loadVersions()
-  } catch (e: any) {
-    ElMessage.error(e.response?.data?.detail ?? '上傳失敗')
-  } finally {
-    uploading.value = false
   }
 }
 

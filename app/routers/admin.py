@@ -1,9 +1,9 @@
 import os
 import secrets as _secrets
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Security
+from fastapi import APIRouter, Body, Depends, HTTPException, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
@@ -168,28 +168,105 @@ def update_pbi_config(
 
 # ── 語意模型管理 ───────────────────────────────────────────────────────────
 
-class ModelUploadRequest(BaseModel):
-    relationships: dict
-    tables: list
+def _parse_pbi_json(raw: dict) -> tuple[dict, list]:
+    """接受原始 PBI JSON 或簡化語意 JSON，回傳 (relationships_dict, tables_list)。"""
+    if "clientDataModel" in raw:
+        data_model = raw["clientDataModel"]["dataModel"]
+        fmt = "raw"
+    else:
+        data_model = raw
+        fmt = "semantic"
+
+    relationships: list = []
+    for rel in data_model.get("relationships", []):
+        if fmt == "raw":
+            from_table = rel.get("fromTableRef", {}).get("name", "")
+            to_table   = rel.get("toTableRef",   {}).get("name", "")
+            direction_map = {"OneDirection": "Single", "BothDirections": "Both"}
+            chunk = {
+                "fromTable":            from_table,
+                "fromColumn":           rel.get("fromColumnRef", {}).get("name", ""),
+                "toTable":              to_table,
+                "toColumn":             rel.get("toColumnRef",   {}).get("name", ""),
+                "cardinality":          f"{rel.get('fromCardinality','Many')}To{rel.get('toCardinality','One')}",
+                "crossFilterDirection": direction_map.get(rel.get("crossFilteringBehavior", "OneDirection"), "Single"),
+                "isActive":             rel.get("isActive", True),
+            }
+        else:
+            from_table = rel.get("fromTable", "")
+            to_table   = rel.get("toTable",   "")
+            chunk = {
+                "fromTable":            from_table,
+                "fromColumn":           rel.get("fromColumn", ""),
+                "toTable":              to_table,
+                "toColumn":             rel.get("toColumn", ""),
+                "cardinality":          rel.get("cardinality", ""),
+                "crossFilterDirection": rel.get("crossFilterDirection", "Single"),
+                "isActive":             rel.get("isActive", True),
+            }
+
+        if any(n.startswith(("LocalDateTable_", "DateTableTemplate_")) for n in [from_table, to_table]):
+            continue
+        relationships.append(chunk)
+
+    tables: list = []
+    for table in data_model.get("tables", []):
+        name = table.get("name", "")
+        if name.startswith(("LocalDateTable_", "DateTableTemplate_")):
+            continue
+        entry = {
+            "table":       name,
+            "description": table.get("description", ""),
+            "columns":     [],
+            "measures":    [],
+        }
+        for col in table.get("columns", []):
+            if col.get("columnType") == "RowNumber":
+                continue
+            entry["columns"].append({
+                "column":      col.get("name"),
+                "dataType":    col.get("dataType"),
+                "description": col.get("description", ""),
+            })
+        for meas in table.get("measures", []):
+            entry["measures"].append({
+                "measure":     meas.get("name"),
+                "expression":  meas.get("expression", ""),
+                "description": meas.get("description", ""),
+            })
+        if entry["columns"] or entry["measures"]:
+            tables.append(entry)
+
+    return {"relationships": relationships}, tables
 
 
 @router.post("/model/upload", status_code=201)
-def upload_model(body: ModelUploadRequest, _=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
-    latest = (
-        db.query(ModelChunk)
-        .order_by(ModelChunk.model_version.desc())
-        .first()
-    )
+def upload_model(
+    raw: Any = Body(...),
+    _: dict = Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    try:
+        relationships, tables = _parse_pbi_json(raw)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"JSON 解析失敗：{e}")
+
+    latest = db.query(ModelChunk).order_by(ModelChunk.model_version.desc()).first()
     next_version = (latest.model_version + 1) if latest else 1
 
     chunk = ModelChunk(
         model_version=next_version,
-        relationships=body.relationships,
-        tables=body.tables,
+        relationships=relationships,
+        tables=tables,
     )
     db.add(chunk)
     db.commit()
-    return {"model_version": next_version, "message": "語意模型上傳成功"}
+    return {
+        "model_version": next_version,
+        "table_count": len(tables),
+        "relationship_count": len(relationships["relationships"]),
+        "message": "語意模型上傳成功",
+    }
 
 
 @router.get("/model/versions")
