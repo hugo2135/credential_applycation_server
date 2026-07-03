@@ -1,6 +1,6 @@
 {
   "scripts": {
-    "dev": "concurrently --kill-others-on-fail --names \"api,ui\" --prefix-colors \"cyan,magenta\" \"uvicorn app.main:app --reload\" \"npm run dev --prefix admin-frontend\""
+    "dev": "concurrently --kill-others-on-fail --names \"api,ui\" --prefix-colors \"cyan,magenta\" \".venv\\\\Scripts\\\\uvicorn app.main:app --reload\" \"npm run dev --prefix admin-frontend\""
   },
   "devDependencies": {
     "concurrently": "^9.0.0"
