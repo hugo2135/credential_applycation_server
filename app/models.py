@@ -40,6 +40,7 @@ class ModelChunk(Base):
 
     id = Column(String, primary_key=True, default=new_uuid)
     model_version = Column(Integer, nullable=False, index=True)
+    name = Column(String, nullable=True)
     relationships = Column(JSON, nullable=False)
     tables = Column(JSON, nullable=False)
     uploaded_at = Column(DateTime, default=datetime.utcnow)

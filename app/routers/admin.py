@@ -1,9 +1,9 @@
 import os
 import secrets as _secrets
 from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Security
+from fastapi import APIRouter, Depends, HTTPException, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User, PbiConfig, ModelChunk
 from app.security import encrypt_secret, issue_admin_jwt, verify_admin_jwt
+from scripts.chunk_model import parse_model
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -168,86 +169,23 @@ def update_pbi_config(
 
 # ── 語意模型管理 ───────────────────────────────────────────────────────────
 
-def _parse_pbi_json(raw: dict) -> tuple[dict, list]:
-    """接受原始 PBI JSON 或簡化語意 JSON，回傳 (relationships_dict, tables_list)。"""
-    if "clientDataModel" in raw:
-        data_model = raw["clientDataModel"]["dataModel"]
-        fmt = "raw"
-    else:
-        data_model = raw
-        fmt = "semantic"
+class ModelUploadRequest(BaseModel):
+    name: Optional[str] = None
+    data: dict
 
-    relationships: list = []
-    for rel in data_model.get("relationships", []):
-        if fmt == "raw":
-            from_table = rel.get("fromTableRef", {}).get("name", "")
-            to_table   = rel.get("toTableRef",   {}).get("name", "")
-            direction_map = {"OneDirection": "Single", "BothDirections": "Both"}
-            chunk = {
-                "fromTable":            from_table,
-                "fromColumn":           rel.get("fromColumnRef", {}).get("name", ""),
-                "toTable":              to_table,
-                "toColumn":             rel.get("toColumnRef",   {}).get("name", ""),
-                "cardinality":          f"{rel.get('fromCardinality','Many')}To{rel.get('toCardinality','One')}",
-                "crossFilterDirection": direction_map.get(rel.get("crossFilteringBehavior", "OneDirection"), "Single"),
-                "isActive":             rel.get("isActive", True),
-            }
-        else:
-            from_table = rel.get("fromTable", "")
-            to_table   = rel.get("toTable",   "")
-            chunk = {
-                "fromTable":            from_table,
-                "fromColumn":           rel.get("fromColumn", ""),
-                "toTable":              to_table,
-                "toColumn":             rel.get("toColumn", ""),
-                "cardinality":          rel.get("cardinality", ""),
-                "crossFilterDirection": rel.get("crossFilterDirection", "Single"),
-                "isActive":             rel.get("isActive", True),
-            }
 
-        if any(n.startswith(("LocalDateTable_", "DateTableTemplate_")) for n in [from_table, to_table]):
-            continue
-        relationships.append(chunk)
-
-    tables: list = []
-    for table in data_model.get("tables", []):
-        name = table.get("name", "")
-        if name.startswith(("LocalDateTable_", "DateTableTemplate_")):
-            continue
-        entry = {
-            "table":       name,
-            "description": table.get("description", ""),
-            "columns":     [],
-            "measures":    [],
-        }
-        for col in table.get("columns", []):
-            if col.get("columnType") == "RowNumber":
-                continue
-            entry["columns"].append({
-                "column":      col.get("name"),
-                "dataType":    col.get("dataType"),
-                "description": col.get("description", ""),
-            })
-        for meas in table.get("measures", []):
-            entry["measures"].append({
-                "measure":     meas.get("name"),
-                "expression":  meas.get("expression", ""),
-                "description": meas.get("description", ""),
-            })
-        if entry["columns"] or entry["measures"]:
-            tables.append(entry)
-
-    return {"relationships": relationships}, tables
+class RenameVersionRequest(BaseModel):
+    name: Optional[str] = None
 
 
 @router.post("/model/upload", status_code=201)
 def upload_model(
-    raw: Any = Body(...),
+    body: ModelUploadRequest,
     _: dict = Depends(_require_admin_jwt),
     db: Session = Depends(get_db),
 ):
     try:
-        relationships, tables = _parse_pbi_json(raw)
+        relationships, tables = parse_model(body.data)
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"JSON 解析失敗：{e}")
 
@@ -256,6 +194,7 @@ def upload_model(
 
     chunk = ModelChunk(
         model_version=next_version,
+        name=body.name,
         relationships=relationships,
         tables=tables,
     )
@@ -263,6 +202,7 @@ def upload_model(
     db.commit()
     return {
         "model_version": next_version,
+        "name": body.name,
         "table_count": len(tables),
         "relationship_count": len(relationships["relationships"]),
         "message": "語意模型上傳成功",
@@ -273,6 +213,59 @@ def upload_model(
 def list_model_versions(_=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
     chunks = db.query(ModelChunk).order_by(ModelChunk.model_version.desc()).all()
     return [
-        {"model_version": c.model_version, "uploaded_at": c.uploaded_at}
+        {
+            "model_version": c.model_version,
+            "name": c.name,
+            "table_count": len(c.tables) if c.tables else 0,
+            "relationship_count": len(c.relationships.get("relationships", [])) if c.relationships else 0,
+            "uploaded_at": c.uploaded_at,
+        }
         for c in chunks
     ]
+
+
+@router.get("/model/versions/{version}")
+def get_model_version(
+    version: int,
+    _: dict = Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    chunk = db.query(ModelChunk).filter(ModelChunk.model_version == version).first()
+    if not chunk:
+        raise HTTPException(status_code=404, detail="版本不存在")
+    return {
+        "model_version": chunk.model_version,
+        "name": chunk.name,
+        "tables": [t["table"] for t in chunk.tables] if chunk.tables else [],
+        "table_count": len(chunk.tables) if chunk.tables else 0,
+        "relationship_count": len(chunk.relationships.get("relationships", [])) if chunk.relationships else 0,
+        "uploaded_at": chunk.uploaded_at,
+    }
+
+
+@router.patch("/model/versions/{version}")
+def rename_model_version(
+    version: int,
+    body: RenameVersionRequest,
+    _: dict = Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    chunk = db.query(ModelChunk).filter(ModelChunk.model_version == version).first()
+    if not chunk:
+        raise HTTPException(status_code=404, detail="版本不存在")
+    chunk.name = body.name
+    db.commit()
+    return {"message": "已更新版本名稱"}
+
+
+@router.delete("/model/versions/{version}", status_code=204)
+def delete_model_version(
+    version: int,
+    _: dict = Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    chunk = db.query(ModelChunk).filter(ModelChunk.model_version == version).first()
+    if not chunk:
+        raise HTTPException(status_code=404, detail="版本不存在")
+    db.delete(chunk)
+    db.commit()

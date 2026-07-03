@@ -6,10 +6,22 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from sqlalchemy import text
 from app.database import engine, Base
 from app.routers import auth, credential, admin
 
 Base.metadata.create_all(bind=engine)
+
+# 自動補欄位（不刪資料的輕量 migration）
+with engine.connect() as _conn:
+    for _stmt in [
+        "ALTER TABLE model_chunks ADD COLUMN name TEXT",
+    ]:
+        try:
+            _conn.execute(text(_stmt))
+            _conn.commit()
+        except Exception:
+            pass  # 欄位已存在則略過
 
 app = FastAPI(title="PBI Credential 申請程式", version="0.1.0")
 

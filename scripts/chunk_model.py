@@ -4,57 +4,34 @@ import re
 import shutil
 import sys
 
-sys.stdout.reconfigure(encoding='utf-8')
-sys.stderr.reconfigure(encoding='utf-8')
 
-
-def sanitize_filename(name):
+def sanitize_filename(name: str) -> str:
     return re.sub(r'[\\/*?:"<>| ]', '_', name)
 
 
-def process_and_chunk_model(input_json_path):
-    output_dir = os.path.join(os.getcwd(), "output")
-    tables_dir = os.path.join(output_dir, "tables")
-    rel_path   = os.path.join(output_dir, "relationships.json")
+def parse_model(data: dict) -> tuple[dict, list]:
+    """
+    接受原始 PBI JSON（clientDataModel 格式）或簡化語意格式。
+    回傳 (relationships_dict, tables_list)，格式與 DB 儲存結構一致。
 
-    # 清除上次結果
-    if os.path.exists(rel_path):
-        os.remove(rel_path)
-    if os.path.exists(tables_dir):
-        shutil.rmtree(tables_dir)
-    os.makedirs(tables_dir)
-
-    print(f"輸出目錄：{output_dir}")
-    print(f"讀取：{input_json_path}")
-
-    try:
-        with open(input_json_path, 'r', encoding='utf-8') as f:
-            raw_data = json.load(f)
-    except FileNotFoundError:
-        print(f"找不到檔案：{input_json_path}")
-        sys.exit(1)
-    except json.JSONDecodeError as e:
-        print(f"JSON 格式錯誤：{e}")
-        sys.exit(1)
-
-    if "clientDataModel" in raw_data:
-        data_model = raw_data["clientDataModel"]["dataModel"]
+    relationships_dict: {"relationships": [...]}
+    tables_list:        [{"table": ..., "columns": [...], "measures": [...]}, ...]
+    """
+    if "clientDataModel" in data:
+        data_model = data["clientDataModel"]["dataModel"]
         fmt = "raw"
     else:
-        data_model = raw_data
+        data_model = data
         fmt = "semantic"
 
-    print(f"格式：{'原始 Power BI' if fmt == 'raw' else '簡化語意模型'}")
-
     # ── Relationships ─────────────────────────────────────────
-    relationships_output = {"relationships": []}
-
+    relationships: list = []
     for rel in data_model.get("relationships", []):
         if fmt == "raw":
             from_table = rel.get("fromTableRef", {}).get("name", "")
             to_table   = rel.get("toTableRef",   {}).get("name", "")
             direction_map = {"OneDirection": "Single", "BothDirections": "Both"}
-            rel_chunk = {
+            chunk = {
                 "fromTable":            from_table,
                 "fromColumn":           rel.get("fromColumnRef", {}).get("name", ""),
                 "toTable":              to_table,
@@ -66,7 +43,7 @@ def process_and_chunk_model(input_json_path):
         else:
             from_table = rel.get("fromTable", "")
             to_table   = rel.get("toTable",   "")
-            rel_chunk = {
+            chunk = {
                 "fromTable":            from_table,
                 "fromColumn":           rel.get("fromColumn", ""),
                 "toTable":              to_table,
@@ -78,14 +55,10 @@ def process_and_chunk_model(input_json_path):
 
         if any(n.startswith(("LocalDateTable_", "DateTableTemplate_")) for n in [from_table, to_table]):
             continue
-        relationships_output["relationships"].append(rel_chunk)
-
-    with open(rel_path, 'w', encoding='utf-8') as f:
-        json.dump(relationships_output, f, ensure_ascii=False, indent=2)
-    print(f"關聯性：{len(relationships_output['relationships'])} 筆 -> {rel_path}")
+        relationships.append(chunk)
 
     # ── Tables ────────────────────────────────────────────────
-    table_count = 0
+    tables: list = []
     for table in data_model.get("tables", []):
         name = table.get("name", "")
         if name.startswith(("LocalDateTable_", "DateTableTemplate_")):
@@ -113,17 +86,57 @@ def process_and_chunk_model(input_json_path):
             })
 
         if entry["columns"] or entry["measures"]:
-            path = os.path.join(tables_dir, f"table_{sanitize_filename(name)}.json")
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(entry, f, ensure_ascii=False, indent=2)
-            table_count += 1
+            tables.append(entry)
 
-    print(f"資料表：{table_count} 張 -> {tables_dir}/")
-    print("完成")
+    return {"relationships": relationships}, tables
+
+
+def _write_to_files(relationships: dict, tables: list, output_dir: str) -> None:
+    tables_dir = os.path.join(output_dir, "tables")
+    rel_path   = os.path.join(output_dir, "relationships.json")
+
+    if os.path.exists(rel_path):
+        os.remove(rel_path)
+    if os.path.exists(tables_dir):
+        shutil.rmtree(tables_dir)
+    os.makedirs(tables_dir)
+
+    with open(rel_path, 'w', encoding='utf-8') as f:
+        json.dump(relationships, f, ensure_ascii=False, indent=2)
+    print(f"關聯性：{len(relationships['relationships'])} 筆 -> {rel_path}")
+
+    for entry in tables:
+        path = os.path.join(tables_dir, f"table_{sanitize_filename(entry['table'])}.json")
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(entry, f, ensure_ascii=False, indent=2)
+    print(f"資料表：{len(tables)} 張 -> {tables_dir}/")
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+
     if len(sys.argv) < 2:
         print("使用方式：python scripts/chunk_model.py <JSON檔案路徑>")
         sys.exit(1)
-    process_and_chunk_model(sys.argv[1])
+
+    input_path = sys.argv[1]
+    output_dir = os.path.join(os.getcwd(), "output")
+
+    print(f"輸出目錄：{output_dir}")
+    print(f"讀取：{input_path}")
+
+    try:
+        with open(input_path, 'r', encoding='utf-8') as f:
+            raw_data = json.load(f)
+    except FileNotFoundError:
+        print(f"找不到檔案：{input_path}")
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"JSON 格式錯誤：{e}")
+        sys.exit(1)
+
+    print(f"格式：{'原始 Power BI' if 'clientDataModel' in raw_data else '簡化語意模型'}")
+    relationships, tables = parse_model(raw_data)
+    _write_to_files(relationships, tables, output_dir)
+    print("完成")
