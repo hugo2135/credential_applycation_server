@@ -25,7 +25,14 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/admin': 'http://localhost:8000',
+      '/admin': {
+        target: 'http://localhost:8000',
+        bypass(req) {
+          // Page navigations (browser fetch with text/html) must be served locally
+          // so Vue Router handles the route. Only proxy actual API calls.
+          if (req.headers.accept?.includes('text/html')) return '/index.html'
+        },
+      },
       '/auth': 'http://localhost:8000',
       '/api': 'http://localhost:8000',
     },
