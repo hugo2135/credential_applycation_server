@@ -11,12 +11,17 @@ def sanitize_filename(name: str) -> str:
 
 def parse_model(data: dict) -> tuple[dict, list]:
     """
-    接受原始 PBI JSON（clientDataModel 格式）或簡化語意格式。
-    回傳 (relationships_dict, tables_list)，格式與 DB 儲存結構一致。
+    接受原始 PBI JSON 或簡化語意格式，回傳 (relationships_dict, tables_list)。
 
-    relationships_dict: {"relationships": [...]}
-    tables_list:        [{"table": ..., "columns": [...], "measures": [...]}, ...]
+    支援的外層結構：
+      A. root.updatedModel.clientDataModel.dataModel  （Power BI refresh export）
+      B. root.clientDataModel.dataModel               （舊版 export）
+      C. root（直接是 dataModel，簡化語意格式）
     """
+    # 剝掉 updatedModel 外殼（格式 A）
+    if "updatedModel" in data:
+        data = data["updatedModel"]
+
     if "clientDataModel" in data:
         data_model = data["clientDataModel"]["dataModel"]
         fmt = "raw"
@@ -136,7 +141,8 @@ if __name__ == "__main__":
         print(f"JSON 格式錯誤：{e}")
         sys.exit(1)
 
-    print(f"格式：{'原始 Power BI' if 'clientDataModel' in raw_data else '簡化語意模型'}")
+    _top = raw_data.get("updatedModel", raw_data)
+    print(f"格式：{'原始 Power BI' if 'clientDataModel' in _top else '簡化語意模型'}")
     relationships, tables = parse_model(raw_data)
     _write_to_files(relationships, tables, output_dir)
     print("完成")
