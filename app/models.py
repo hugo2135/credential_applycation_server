@@ -12,12 +12,9 @@ class PbiConfig(Base):
     __tablename__ = "pbi_config"
 
     id = Column(String, primary_key=True, default=new_uuid)
-    name = Column(String, unique=True, nullable=False)       # 識別名稱，例如 "TenantA"
-    tenant_id = Column(String, nullable=False)
-    client_id = Column(String, nullable=False)
-    client_secret_enc = Column(String, nullable=False)       # AES-GCM 加密後儲存
-    workspace_id = Column(String, nullable=True)             # 指派工作區後填入
-    dataset_id = Column(String, nullable=True)               # 指派工作區後填入
+    name = Column(String, unique=True, nullable=False)
+    workspace_id = Column(String, nullable=True)
+    dataset_id = Column(String, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
@@ -30,9 +27,19 @@ class User(Base):
     mask_key_hash = Column(String, nullable=True, index=True)
     is_active = Column(Boolean, default=False)
     is_admin = Column(Boolean, default=False)
-    pbi_config_id = Column(String, ForeignKey("pbi_config.id"), nullable=True)
+    pbi_config_id = Column(String, ForeignKey("pbi_config.id"), nullable=True)  # legacy
+    tenant_id = Column(String, nullable=True)
+    client_id = Column(String, nullable=True)
+    client_secret_enc = Column(String, nullable=True)        # AES-GCM 加密後儲存
     created_at = Column(DateTime, default=datetime.utcnow)
     expires_at = Column(DateTime, nullable=True)
+
+
+class UserPbiConfig(Base):
+    __tablename__ = "user_pbi_configs"
+
+    user_id = Column(String, ForeignKey("users.id"), primary_key=True)
+    pbi_config_id = Column(String, ForeignKey("pbi_config.id"), primary_key=True)
 
 
 class ModelChunk(Base):
@@ -41,6 +48,7 @@ class ModelChunk(Base):
     id = Column(String, primary_key=True, default=new_uuid)
     model_version = Column(Integer, nullable=False, index=True)
     name = Column(String, nullable=True)
+    pbi_config_id = Column(String, ForeignKey("pbi_config.id"), nullable=True, index=True)
     relationships = Column(JSON, nullable=False)
     tables = Column(JSON, nullable=False)
     uploaded_at = Column(DateTime, default=datetime.utcnow)

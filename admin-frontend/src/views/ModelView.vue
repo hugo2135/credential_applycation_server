@@ -6,6 +6,22 @@
         <template #header>上傳新版語意模型</template>
 
         <el-form label-position="top">
+          <el-form-item label="PBI 設定（必填）" required>
+            <el-select
+              v-model="uploadConfigId"
+              placeholder="選擇 PBI 設定"
+              style="width: 100%"
+              :loading="loadingConfigs"
+            >
+              <el-option
+                v-for="c in configs"
+                :key="c.id"
+                :label="c.name"
+                :value="c.id"
+              />
+            </el-select>
+          </el-form-item>
+
           <el-form-item label="版本名稱（選填）">
             <el-input v-model="uploadName" placeholder="例：2025 Q3 財務模型" clearable />
           </el-form-item>
@@ -59,7 +75,27 @@
     <!-- 版本歷史 -->
     <el-col :span="11">
       <el-card>
-        <template #header>版本歷史</template>
+        <template #header>
+          <div style="display: flex; align-items: center; gap: 12px">
+            <span>版本歷史</span>
+            <el-select
+              v-model="filterConfigId"
+              placeholder="全部 PBI 設定"
+              clearable
+              size="small"
+              style="width: 160px"
+              @change="loadVersions"
+            >
+              <el-option
+                v-for="c in configs"
+                :key="c.id"
+                :label="c.name"
+                :value="c.id"
+              />
+            </el-select>
+          </div>
+        </template>
+
         <el-table
           :data="versions"
           v-loading="loadingVersions"
@@ -91,7 +127,7 @@
 
           <el-table-column prop="model_version" label="版本" width="60" align="center" />
 
-          <el-table-column label="名稱" min-width="120">
+          <el-table-column label="名稱" min-width="110">
             <template #default="{ row }">
               <template v-if="editingVersion === row.model_version">
                 <el-input
@@ -106,7 +142,7 @@
               <span
                 v-else
                 style="cursor: pointer; color: #303133"
-                :title="'雙擊改名'"
+                title="雙擊改名"
                 @dblclick="startRename(row)"
               >
                 {{ row.name || '—' }}
@@ -114,7 +150,13 @@
             </template>
           </el-table-column>
 
-          <el-table-column label="上傳時間" min-width="140">
+          <el-table-column label="PBI 設定" min-width="90">
+            <template #default="{ row }">
+              <span style="font-size: 12px; color: #606266">{{ configName(row.pbi_config_id) }}</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="上傳時間" min-width="120">
             <template #default="{ row }">{{ fmtDate(row.uploaded_at) }}</template>
           </el-table-column>
 
@@ -143,9 +185,14 @@ import { ElMessage } from 'element-plus'
 import type { UploadFile } from 'element-plus'
 import http from '@/api/http'
 
+interface PbiConfig {
+  id: string
+  name: string
+}
 interface Version {
   model_version: number
   name: string | null
+  pbi_config_id: string | null
   table_count: number
   relationship_count: number
   uploaded_at: string
@@ -155,6 +202,11 @@ interface Detail {
   table_count: number
   relationship_count: number
 }
+
+const configs        = ref<PbiConfig[]>([])
+const loadingConfigs = ref(false)
+const uploadConfigId = ref('')
+const filterConfigId = ref('')
 
 const inputMode    = ref<'file' | 'text'>('file')
 const uploadName   = ref('')
@@ -174,6 +226,21 @@ function fmtDate(d: string) {
   return new Date(d).toLocaleString()
 }
 
+function configName(id: string | null) {
+  if (!id) return '—'
+  return configs.value.find(c => c.id === id)?.name ?? '—'
+}
+
+async function loadConfigs() {
+  loadingConfigs.value = true
+  try {
+    const res = await http.get('/pbi-configs')
+    configs.value = res.data
+  } finally {
+    loadingConfigs.value = false
+  }
+}
+
 function handleFileChange(file: UploadFile) {
   if (!file.raw) return
   fileName.value = file.raw.name
@@ -184,6 +251,10 @@ function handleFileChange(file: UploadFile) {
 
 async function handleUpload() {
   parseError.value = ''
+  if (!uploadConfigId.value) {
+    parseError.value = '請選擇 PBI 設定'
+    return
+  }
   const source = inputMode.value === 'file' ? fileContent.value : rawJson.value
   if (!source.trim()) {
     parseError.value = inputMode.value === 'file' ? '請先選擇 .json 檔案' : '請貼上 JSON 內容'
@@ -196,7 +267,11 @@ async function handleUpload() {
   }
   uploading.value = true
   try {
-    const res = await http.post('/model/upload', { name: uploadName.value || null, data: parsed })
+    const res = await http.post('/model/upload', {
+      pbi_config_id: uploadConfigId.value,
+      name: uploadName.value || null,
+      data: parsed,
+    })
     ElMessage.success(
       `上傳成功 — 版本 ${res.data.model_version}（${res.data.table_count} 張表，${res.data.relationship_count} 個關聯）`
     )
@@ -216,7 +291,8 @@ async function handleUpload() {
 async function loadVersions() {
   loadingVersions.value = true
   try {
-    const res = await http.get('/model/versions')
+    const params = filterConfigId.value ? { pbi_config_id: filterConfigId.value } : {}
+    const res = await http.get('/model/versions', { params })
     versions.value = res.data
   } finally {
     loadingVersions.value = false
@@ -261,5 +337,8 @@ async function deleteVersion(row: Version) {
   }
 }
 
-onMounted(loadVersions)
+onMounted(async () => {
+  await loadConfigs()
+  await loadVersions()
+})
 </script>

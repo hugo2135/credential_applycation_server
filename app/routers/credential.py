@@ -1,14 +1,17 @@
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Security
+import msal
+from fastapi import APIRouter, Depends, HTTPException, Query, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import User, PbiConfig, ModelChunk
-from app.security import hash_mask_key, decrypt_secret, issue_credential_jwt
+from app.models import User, PbiConfig, ModelChunk, UserPbiConfig
+from app.security import hash_mask_key, decrypt_secret
 
 router = APIRouter(prefix="/api", tags=["skill-api"])
 bearer = HTTPBearer()
+
+_POWERBI_SCOPE = ["https://analysis.windows.net/powerbi/api/.default"]
 
 
 def _resolve_user(
@@ -26,48 +29,88 @@ def _resolve_user(
     return user
 
 
-@router.get("/credential")
-def get_credential(user: User = Depends(_resolve_user), db: Session = Depends(get_db)):
-    if not user.pbi_config_id:
-        raise HTTPException(status_code=503, detail="尚未分配 PBI 設定，請聯絡管理員")
-
-    config: PbiConfig = db.query(PbiConfig).filter(PbiConfig.id == user.pbi_config_id).first()
+def _check_config_access(user: User, pbi_config_id: str, db: Session) -> PbiConfig:
+    link = db.query(UserPbiConfig).filter(
+        UserPbiConfig.user_id == user.id,
+        UserPbiConfig.pbi_config_id == pbi_config_id,
+    ).first()
+    if not link:
+        raise HTTPException(status_code=403, detail="無此 PBI 設定的存取權")
+    config = db.query(PbiConfig).filter(PbiConfig.id == pbi_config_id).first()
     if not config:
         raise HTTPException(status_code=503, detail="PBI 設定不存在，請聯絡管理員")
+    return config
+
+
+def _check_user_credentials(user: User):
+    if not user.tenant_id or not user.client_id or not user.client_secret_enc:
+        raise HTTPException(status_code=503, detail="Azure AD 憑證尚未設定，請聯絡管理員")
+
+
+@router.get("/models")
+def get_models(
+    user: User = Depends(_resolve_user),
+    db: Session = Depends(get_db),
+):
+    links = db.query(UserPbiConfig).filter(UserPbiConfig.user_id == user.id).all()
+    result = []
+    for link in links:
+        config = db.query(PbiConfig).filter(PbiConfig.id == link.pbi_config_id).first()
+        if not config:
+            continue
+        latest = (
+            db.query(ModelChunk)
+            .filter(ModelChunk.pbi_config_id == link.pbi_config_id)
+            .order_by(ModelChunk.model_version.desc())
+            .first()
+        )
+        if not latest:
+            continue
+        result.append({
+            "pbi_config_id": config.id,
+            "pbi_config_name": config.name,
+            "model_version": latest.model_version,
+            "relationships": latest.relationships,
+            "tables": latest.tables,
+        })
+    return {"models": result}
+
+
+@router.get("/token")
+def get_token(
+    pbi_config_id: str = Query(..., description="PBI 設定 ID"),
+    user: User = Depends(_resolve_user),
+    db: Session = Depends(get_db),
+):
+    _check_user_credentials(user)
+    config = _check_config_access(user, pbi_config_id, db)
     if not config.workspace_id or not config.dataset_id:
         raise HTTPException(status_code=503, detail="PBI 工作區尚未設定完成，請聯絡管理員")
 
+    client_secret = decrypt_secret(user.client_secret_enc)
+    msal_app = msal.ConfidentialClientApplication(
+        client_id=user.client_id,
+        authority=f"https://login.microsoftonline.com/{user.tenant_id}",
+        client_credential=client_secret,
+    )
+    result = msal_app.acquire_token_for_client(scopes=_POWERBI_SCOPE)
+
+    if "access_token" not in result:
+        error = result.get("error_description", result.get("error", "未知錯誤"))
+        raise HTTPException(status_code=502, detail=f"Azure AD 驗證失敗：{error}")
+
     latest = (
         db.query(ModelChunk)
+        .filter(ModelChunk.pbi_config_id == pbi_config_id)
         .order_by(ModelChunk.model_version.desc())
         .first()
     )
-    model_version = latest.model_version if latest else 0
-
-    payload = {
-        "tenant_id": config.tenant_id,
-        "client_id": config.client_id,
-        "client_secret": decrypt_secret(config.client_secret_enc),
-        "workspace_id": config.workspace_id,
-        "dataset_id": config.dataset_id,
-        "model_version": model_version,
-    }
-    token = issue_credential_jwt(payload, expires_at=user.expires_at)
-    return {"jwt": token}
-
-
-@router.get("/model")
-def get_model(user: User = Depends(_resolve_user), db: Session = Depends(get_db)):
-    latest = (
-        db.query(ModelChunk)
-        .order_by(ModelChunk.model_version.desc())
-        .first()
-    )
-    if not latest:
-        raise HTTPException(status_code=404, detail="尚未上傳語意模型")
 
     return {
-        "model_version": latest.model_version,
-        "relationships": latest.relationships,
-        "tables": latest.tables,
+        "access_token": result["access_token"],
+        "token_type": "Bearer",
+        "expires_in": result.get("expires_in", 3600),
+        "workspace_id": config.workspace_id,
+        "dataset_id": config.dataset_id,
+        "model_version": latest.model_version if latest else 0,
     }
