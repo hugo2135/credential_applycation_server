@@ -10,19 +10,19 @@ const router = createRouter({
       path: '/login',
       name: 'user-login',
       component: () => import('@/views/UserLoginView.vue'),
-      meta: { layout: 'guest' },
+      meta: { layout: 'guest', title: 'PBI 憑證申請 - 登入' },
     },
     {
       path: '/register',
       name: 'register',
       component: () => import('@/views/RegisterView.vue'),
-      meta: { layout: 'guest' },
+      meta: { layout: 'guest', title: 'PBI 憑證申請 - 註冊' },
     },
     {
       path: '/dashboard',
       name: 'dashboard',
       component: () => import('@/views/DashboardView.vue'),
-      meta: { layout: 'user', requiresAuth: 'user' },
+      meta: { layout: 'user', requiresAuth: 'user', title: 'PBI 憑證申請 - 我的帳號' },
     },
 
     // ── Admin routes ─────────────────────────────────────────
@@ -30,25 +30,25 @@ const router = createRouter({
       path: '/admin/login',
       name: 'admin-login',
       component: () => import('@/views/LoginView.vue'),
-      meta: { layout: 'guest' },
+      meta: { layout: 'guest', title: 'PBI 管理後台 - 登入' },
     },
     {
       path: '/admin/users',
       name: 'admin-users',
       component: () => import('@/views/UsersView.vue'),
-      meta: { layout: 'admin', requiresAuth: 'admin' },
+      meta: { layout: 'admin', requiresAuth: 'admin', title: 'PBI 管理後台 - 使用者管理' },
     },
     {
       path: '/admin/pbi-configs',
       name: 'admin-pbi-configs',
       component: () => import('@/views/PbiConfigsView.vue'),
-      meta: { layout: 'admin', requiresAuth: 'admin' },
+      meta: { layout: 'admin', requiresAuth: 'admin', title: 'PBI 管理後台 - PBI 設定' },
     },
     {
       path: '/admin/model',
       name: 'admin-model',
       component: () => import('@/views/ModelView.vue'),
-      meta: { layout: 'admin', requiresAuth: 'admin' },
+      meta: { layout: 'admin', requiresAuth: 'admin', title: 'PBI 管理後台 - 語意模型' },
     },
 
     // ── Fallback ──────────────────────────────────────────────
@@ -61,6 +61,8 @@ const router = createRouter({
 router.beforeEach((to) => {
   const adminAuth = useAuthStore()
   const userAuth = useUserAuthStore()
+
+  document.title = (to.meta.title as string) ?? 'PBI 憑證申請'
 
   if (to.meta.requiresAuth === 'admin' && !adminAuth.isAuthenticated) return '/admin/login'
   if (to.meta.requiresAuth === 'user' && !userAuth.isAuthenticated) return '/login'
