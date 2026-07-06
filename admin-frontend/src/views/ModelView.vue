@@ -109,11 +109,11 @@
                 <div v-if="!details[row.model_version]" style="color: #909399; font-size: 13px">載入中…</div>
                 <template v-else>
                   <div style="font-size: 13px; color: #606266; margin-bottom: 6px">
-                    {{ details[row.model_version].table_count }} 張表・
-                    {{ details[row.model_version].relationship_count }} 個關聯
+                    {{ details[row.model_version]?.table_count }} 張表・
+                    {{ details[row.model_version]?.relationship_count }} 個關聯
                   </div>
                   <el-tag
-                    v-for="t in details[row.model_version].tables"
+                    v-for="t in details[row.model_version]?.tables"
                     :key="t"
                     size="small"
                     style="margin: 2px"
