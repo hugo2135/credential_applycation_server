@@ -103,4 +103,7 @@ if os.path.isdir(FRONTEND_DIST):
     def serve_spa(full_path: str):
         if full_path.startswith(("api/", "auth/", "admin/", "health")):
             raise HTTPException(status_code=404, detail="Not Found")
-        return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
+        return FileResponse(
+            os.path.join(FRONTEND_DIST, "index.html"),
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
