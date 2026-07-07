@@ -169,11 +169,12 @@
             <template #default="{ row }">{{ fmtDate(row.uploaded_at) }}</template>
           </el-table-column>
 
-          <el-table-column label="" width="130" align="center">
+          <el-table-column label="" width="190" align="center">
             <template #default="{ row }">
               <el-button size="small" @click="openDescDialog(row)">
                 {{ row.model_description ? '編輯說明' : '新增說明' }}
               </el-button>
+              <el-button size="small" type="success" plain @click="exportVersion(row)">匯出</el-button>
               <el-popconfirm
                 title="確定刪除此版本？"
                 confirm-button-type="danger"
@@ -357,6 +358,20 @@ async function saveRename(row: Version) {
     row.name = editingName.value || null
   } catch {
     ElMessage.error('改名失敗')
+  }
+}
+
+async function exportVersion(row: Version) {
+  try {
+    const res = await http.get(`/model/versions/${row.model_version}/export`, { responseType: 'blob' })
+    const url = URL.createObjectURL(new Blob([res.data], { type: 'application/json' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `model_v${row.model_version}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch {
+    ElMessage.error('匯出失敗')
   }
 }
 

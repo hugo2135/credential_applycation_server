@@ -1,9 +1,11 @@
 import os
+import json
 import secrets as _secrets
 from datetime import datetime
 from typing import Optional
 
 from fastapi import Query
+from fastapi.responses import Response
 
 from fastapi import APIRouter, Depends, HTTPException, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -347,6 +349,30 @@ def rename_model_version(
         chunk.model_description = body.model_description
     db.commit()
     return {"message": "已更新版本資訊"}
+
+
+@router.get("/model/versions/{version}/export")
+def export_model_version(
+    version: int,
+    _: dict = Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    chunk = db.query(ModelChunk).filter(ModelChunk.model_version == version).first()
+    if not chunk:
+        raise HTTPException(status_code=404, detail="版本不存在")
+    payload = {
+        "model_version": chunk.model_version,
+        "name": chunk.name,
+        "pbi_config_id": chunk.pbi_config_id,
+        "relationships": chunk.relationships,
+        "tables": chunk.tables,
+    }
+    filename = f"model_v{version}.json"
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.delete("/model/versions/{version}", status_code=204)
