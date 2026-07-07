@@ -243,11 +243,13 @@ def delete_pbi_config(
 class ModelUploadRequest(BaseModel):
     pbi_config_id: str
     name: Optional[str] = None
+    model_description: Optional[str] = None
     data: dict
 
 
 class RenameVersionRequest(BaseModel):
     name: Optional[str] = None
+    model_description: Optional[str] = None
 
 
 @router.post("/model/upload", status_code=201)
@@ -270,6 +272,7 @@ def upload_model(
     chunk = ModelChunk(
         model_version=next_version,
         name=body.name,
+        model_description=body.model_description,
         pbi_config_id=body.pbi_config_id,
         relationships=relationships,
         tables=tables,
@@ -299,6 +302,7 @@ def list_model_versions(
         {
             "model_version": c.model_version,
             "name": c.name,
+            "model_description": c.model_description,
             "pbi_config_id": c.pbi_config_id,
             "table_count": len(c.tables) if c.tables else 0,
             "relationship_count": len(c.relationships.get("relationships", [])) if c.relationships else 0,
@@ -320,6 +324,7 @@ def get_model_version(
     return {
         "model_version": chunk.model_version,
         "name": chunk.name,
+        "model_description": chunk.model_description,
         "tables": [t["table"] for t in chunk.tables] if chunk.tables else [],
         "table_count": len(chunk.tables) if chunk.tables else 0,
         "relationship_count": len(chunk.relationships.get("relationships", [])) if chunk.relationships else 0,
@@ -338,8 +343,10 @@ def rename_model_version(
     if not chunk:
         raise HTTPException(status_code=404, detail="版本不存在")
     chunk.name = body.name
+    if body.model_description is not None:
+        chunk.model_description = body.model_description
     db.commit()
-    return {"message": "已更新版本名稱"}
+    return {"message": "已更新版本資訊"}
 
 
 @router.delete("/model/versions/{version}", status_code=204)

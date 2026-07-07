@@ -70,6 +70,7 @@ def get_models(
             "pbi_config_id": config.id,
             "pbi_config_name": config.name,
             "model_version": latest.model_version,
+            "model_description": latest.model_description,
             "relationships": latest.relationships,
             "tables": latest.tables,
         })

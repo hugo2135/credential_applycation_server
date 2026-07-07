@@ -45,6 +45,7 @@ with engine.connect() as _conn:
     for _stmt in [
         "ALTER TABLE model_chunks ADD COLUMN name TEXT",
         "ALTER TABLE model_chunks ADD COLUMN pbi_config_id TEXT REFERENCES pbi_config(id)",
+        "ALTER TABLE model_chunks ADD COLUMN model_description TEXT",
         """CREATE TABLE IF NOT EXISTS user_pbi_configs (
             user_id TEXT NOT NULL REFERENCES users(id),
             pbi_config_id TEXT NOT NULL REFERENCES pbi_config(id),

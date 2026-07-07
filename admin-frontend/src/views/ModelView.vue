@@ -25,6 +25,15 @@
           <el-form-item label="版本名稱（選填）">
             <el-input v-model="uploadName" placeholder="例：2025 Q3 財務模型" clearable />
           </el-form-item>
+
+          <el-form-item label="模型說明（選填）">
+            <el-input
+              v-model="uploadDescription"
+              type="textarea"
+              :rows="5"
+              placeholder="以 Markdown 撰寫可查詢資料範圍、資料表用途、重要量值說明等，供 Skill 直接使用"
+            />
+          </el-form-item>
         </el-form>
 
         <el-tabs v-model="inputMode" style="margin-top: 4px">
@@ -160,8 +169,11 @@
             <template #default="{ row }">{{ fmtDate(row.uploaded_at) }}</template>
           </el-table-column>
 
-          <el-table-column label="" width="70" align="center">
+          <el-table-column label="" width="130" align="center">
             <template #default="{ row }">
+              <el-button size="small" @click="openDescDialog(row)">
+                {{ row.model_description ? '編輯說明' : '新增說明' }}
+              </el-button>
               <el-popconfirm
                 title="確定刪除此版本？"
                 confirm-button-type="danger"
@@ -179,6 +191,23 @@
   </el-row>
 </template>
 
+<!-- 編輯模型說明 dialog -->
+<el-dialog v-model="descDialog.visible" title="模型說明" width="600px">
+  <el-alert type="info" :closable="false" style="margin-bottom: 12px">
+    <template #title>以 Markdown 撰寫，Skill 會直接輸出給使用者，留空則由 Claude 自動推論</template>
+  </el-alert>
+  <el-input
+    v-model="descDialog.text"
+    type="textarea"
+    :rows="14"
+    placeholder="## 可查詢的資料主題&#10;&#10;### 訂單與銷售&#10;| 資料表 | 說明 |&#10;..."
+  />
+  <template #footer>
+    <el-button @click="descDialog.visible = false">取消</el-button>
+    <el-button type="primary" :loading="descDialog.loading" @click="saveDescription">儲存</el-button>
+  </template>
+</el-dialog>
+
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
@@ -192,6 +221,7 @@ interface PbiConfig {
 interface Version {
   model_version: number
   name: string | null
+  model_description: string | null
   pbi_config_id: string | null
   table_count: number
   relationship_count: number
@@ -208,8 +238,9 @@ const loadingConfigs = ref(false)
 const uploadConfigId = ref('')
 const filterConfigId = ref('')
 
-const inputMode    = ref<'file' | 'text'>('file')
-const uploadName   = ref('')
+const inputMode         = ref<'file' | 'text'>('file')
+const uploadName        = ref('')
+const uploadDescription = ref('')
 const fileContent  = ref('')
 const fileName     = ref('')
 const fileList     = ref<UploadFile[]>([])
@@ -221,6 +252,7 @@ const loadingVersions = ref(false)
 const details      = ref<Record<number, Detail>>({})
 const editingVersion = ref<number | null>(null)
 const editingName    = ref('')
+const descDialog     = ref({ visible: false, loading: false, version: 0, text: '' })
 
 function fmtDate(d: string) {
   return new Date(d).toLocaleString()
@@ -270,12 +302,14 @@ async function handleUpload() {
     const res = await http.post('/model/upload', {
       pbi_config_id: uploadConfigId.value,
       name: uploadName.value || null,
+      model_description: uploadDescription.value || null,
       data: parsed,
     })
     ElMessage.success(
       `上傳成功 — 版本 ${res.data.model_version}（${res.data.table_count} 張表，${res.data.relationship_count} 個關聯）`
     )
     uploadName.value = ''
+    uploadDescription.value = ''
     fileContent.value = ''
     fileName.value = ''
     fileList.value = []
@@ -323,6 +357,25 @@ async function saveRename(row: Version) {
     row.name = editingName.value || null
   } catch {
     ElMessage.error('改名失敗')
+  }
+}
+
+function openDescDialog(row: Version) {
+  descDialog.value = { visible: true, loading: false, version: row.model_version, text: row.model_description ?? '' }
+}
+
+async function saveDescription() {
+  descDialog.value.loading = true
+  try {
+    await http.patch(`/model/versions/${descDialog.value.version}`, { model_description: descDialog.value.text || null })
+    const row = versions.value.find(v => v.model_version === descDialog.value.version)
+    if (row) row.model_description = descDialog.value.text || null
+    ElMessage.success('模型說明已儲存')
+    descDialog.value.visible = false
+  } catch {
+    ElMessage.error('儲存失敗')
+  } finally {
+    descDialog.value.loading = false
   }
 }
 

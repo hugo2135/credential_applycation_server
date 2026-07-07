@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Boolean, DateTime, Integer, JSON, ForeignKey
+from sqlalchemy import Column, String, Boolean, DateTime, Integer, JSON, Text, ForeignKey
 from app.database import Base
 
 
@@ -49,6 +49,7 @@ class ModelChunk(Base):
     model_version = Column(Integer, nullable=False, index=True)
     name = Column(String, nullable=True)
     pbi_config_id = Column(String, ForeignKey("pbi_config.id"), nullable=True, index=True)
+    model_description = Column(Text, nullable=True)
     relationships = Column(JSON, nullable=False)
     tables = Column(JSON, nullable=False)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
