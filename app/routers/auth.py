@@ -1,3 +1,4 @@
+import os
 from fastapi import APIRouter, Depends, HTTPException, Security, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
@@ -10,6 +11,16 @@ from app.security import (
     generate_mask_key, hash_mask_key,
     issue_user_jwt, verify_user_jwt,
 )
+
+
+def _check_email_domain(email: str):
+    raw = os.getenv("ALLOWED_EMAIL_DOMAINS", "")
+    allowed = {d.strip().lower() for d in raw.split(",") if d.strip()}
+    if not allowed:
+        return
+    domain = email.split("@")[-1].lower()
+    if domain not in allowed:
+        raise HTTPException(status_code=400, detail=f"僅限特定網域信箱註冊（{', '.join(sorted(allowed))}）")
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 _bearer = HTTPBearer()
@@ -51,6 +62,7 @@ class MaskKeyResponse(BaseModel):
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 def register(body: RegisterRequest, db: Session = Depends(get_db)):
+    _check_email_domain(body.email)
     if db.query(User).filter(User.email == body.email).first():
         raise HTTPException(status_code=409, detail="Email 已被使用")
     user = User(email=body.email, password_hash=hash_password(body.password))
