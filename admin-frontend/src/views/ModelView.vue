@@ -367,7 +367,8 @@ async function exportVersion(row: Version) {
     const url = URL.createObjectURL(new Blob([res.data], { type: 'application/json' }))
     const a = document.createElement('a')
     a.href = url
-    a.download = `model_v${row.model_version}.json`
+    const safeName = configName(row.pbi_config_id).replace(/[/\\:*?"<>|]/g, '_')
+    a.download = `${safeName}_v${row.model_version}.json`
     a.click()
     URL.revokeObjectURL(url)
   } catch {
