@@ -190,10 +190,9 @@
       </el-card>
     </el-col>
   </el-row>
-</template>
 
-<!-- 編輯模型說明 dialog -->
-<el-dialog v-model="descDialog.visible" title="模型說明" width="600px">
+  <!-- 編輯模型說明 dialog -->
+  <el-dialog v-model="descDialog.visible" title="模型說明" width="600px">
   <el-alert type="info" :closable="false" style="margin-bottom: 12px">
     <template #title>以 Markdown 撰寫，Skill 會直接輸出給使用者，留空則由 Claude 自動推論</template>
   </el-alert>
@@ -208,6 +207,7 @@
     <el-button type="primary" :loading="descDialog.loading" @click="saveDescription">儲存</el-button>
   </template>
 </el-dialog>
+</template>
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
