@@ -20,7 +20,7 @@ def _check_email_domain(email: str):
         return
     domain = email.split("@")[-1].lower()
     if domain not in allowed:
-        raise HTTPException(status_code=400, detail=f"僅限特定網域信箱註冊（{', '.join(sorted(allowed))}）")
+        raise HTTPException(status_code=400, detail="此信箱網域不開放註冊，請洽管理員")
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 _bearer = HTTPBearer()
