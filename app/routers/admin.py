@@ -17,7 +17,7 @@ from app.models import User, PbiConfig, ModelChunk, UserPbiConfig
 from app.security import encrypt_secret, issue_admin_jwt, verify_admin_jwt
 from scripts.chunk_model import parse_model
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 _bearer = HTTPBearer()
 

@@ -54,7 +54,10 @@ const router = createRouter({
     // ── Fallback ──────────────────────────────────────────────
     { path: '/admin', redirect: '/admin/login' },
     { path: '/', redirect: '/login' },
-    { path: '/:pathMatch(.*)*', redirect: '/login' },
+    {
+      path: '/:pathMatch(.*)*',
+      redirect: (to) => (to.path.startsWith('/admin') ? '/admin/login' : '/login'),
+    },
   ],
 })
 
@@ -64,7 +67,10 @@ router.beforeEach((to) => {
 
   document.title = (to.meta.title as string) ?? 'PBI 憑證申請'
 
-  if (to.meta.requiresAuth === 'admin' && !adminAuth.isAuthenticated) return '/admin/login'
+  // 任何 /admin/* 路徑（不論是否已定義路由）未授權一律導回 /admin/login
+  if (to.path.startsWith('/admin') && to.name !== 'admin-login' && !adminAuth.isAuthenticated) {
+    return '/admin/login'
+  }
   if (to.meta.requiresAuth === 'user' && !userAuth.isAuthenticated) return '/login'
 
   if (to.name === 'admin-login' && adminAuth.isAuthenticated) return '/admin/users'

@@ -6,14 +6,16 @@
 
 ```
 FastAPI 後端
-  /auth/*   → 使用者自助（註冊、登入、領取 PBI_MASK_KEY）
-  /api/*    → Skill 呼叫（取得 Azure AD token & 語意模型）
-  /admin/*  → 管理後台 API（CRUD、模型上傳）
+  /auth/*       → 使用者自助（註冊、登入、領取 PBI_MASK_KEY）
+  /api/*        → Skill 呼叫（取得 Azure AD token & 語意模型）
+  /api/admin/*  → 管理後台 API（CRUD、模型上傳）
 
 Vue 3 SPA（同一 origin）
   /login, /register, /dashboard  → 使用者頁面
   /admin/login, /admin/*         → 管理員後台
 ```
+
+前端頁面路徑 `/admin/*` 與後端管理 API 路徑 `/api/admin/*` 刻意分開，避免整頁重整／直接輸入網址時，請求被同名後端路由攔截而拿到 JSON 而非 SPA 頁面。
 
 ### 安全設計重點
 
@@ -115,30 +117,30 @@ Skill 用 `access_token` + `workspace_id` + `dataset_id` 直接對 Power BI Exec
 | 方法 | 路徑 | 驗證 | 說明 |
 |------|------|------|------|
 | POST | `/auth/register` | 無 | 註冊新帳號 |
-| POST | `/auth/token` | 無 | 帳密登入，回傳 8 小時 user session JWT |
+| POST | `/auth/login` | 無 | 帳密登入，回傳 8 小時 user session JWT |
 | GET | `/auth/me` | Bearer user JWT | 查看帳號狀態與 key 領取狀況 |
 | POST | `/auth/mask-key` | Bearer user JWT | 領取 PBI_MASK_KEY（僅顯示一次） |
 
-### 管理員 API（`/admin/*`）
+### 管理員 API（`/api/admin/*`）
 
 | 方法 | 路徑 | 說明 |
 |------|------|------|
-| POST | `/admin/login` | 輸入 ADMIN_SECRET，回傳 1 小時 admin JWT |
-| GET | `/admin/users` | 列出所有使用者 |
-| PATCH | `/admin/users/activate` | 開通／停用帳號、設到期日 |
-| PATCH | `/admin/users/{id}/credentials` | 設定 Azure AD 憑證（Tenant / Client / Secret） |
-| PUT | `/admin/users/{id}/pbi-configs` | 指派語意模型（多個） |
-| POST | `/admin/users/{id}/reset-mask-key` | 重設 PBI_MASK_KEY（清除 hash，使用者重新領取） |
-| DELETE | `/admin/users/{id}` | 刪除使用者 |
-| GET | `/admin/pbi-configs` | 列出所有 PBI 設定 |
-| POST | `/admin/pbi-configs` | 建立 PBI 設定 |
-| PATCH | `/admin/pbi-configs/{id}` | 更新 PBI 設定 |
-| DELETE | `/admin/pbi-configs/{id}` | 刪除 PBI 設定（含關聯語意模型） |
-| POST | `/admin/model/upload` | 上傳語意模型（接受原始 PBI JSON） |
-| GET | `/admin/model/versions` | 列出所有版本 |
-| GET | `/admin/model/versions/{v}` | 取得指定版本的表名清單 |
-| PATCH | `/admin/model/versions/{v}` | 更新版本名稱 |
-| DELETE | `/admin/model/versions/{v}` | 刪除指定版本 |
+| POST | `/api/admin/login` | 輸入 ADMIN_SECRET，回傳 1 小時 admin JWT |
+| GET | `/api/admin/users` | 列出所有使用者 |
+| PATCH | `/api/admin/users/activate` | 開通／停用帳號、設到期日 |
+| PATCH | `/api/admin/users/{id}/credentials` | 設定 Azure AD 憑證（Tenant / Client / Secret） |
+| PUT | `/api/admin/users/{id}/pbi-configs` | 指派語意模型（多個） |
+| POST | `/api/admin/users/{id}/reset-mask-key` | 重設 PBI_MASK_KEY（清除 hash，使用者重新領取） |
+| DELETE | `/api/admin/users/{id}` | 刪除使用者 |
+| GET | `/api/admin/pbi-configs` | 列出所有 PBI 設定 |
+| POST | `/api/admin/pbi-configs` | 建立 PBI 設定 |
+| PATCH | `/api/admin/pbi-configs/{id}` | 更新 PBI 設定 |
+| DELETE | `/api/admin/pbi-configs/{id}` | 刪除 PBI 設定（含關聯語意模型） |
+| POST | `/api/admin/model/upload` | 上傳語意模型（接受原始 PBI JSON） |
+| GET | `/api/admin/model/versions` | 列出所有版本 |
+| GET | `/api/admin/model/versions/{v}` | 取得指定版本的表名清單 |
+| PATCH | `/api/admin/model/versions/{v}` | 更新版本名稱 |
+| DELETE | `/api/admin/model/versions/{v}` | 刪除指定版本 |
 
 ## 使用者開通流程
 
@@ -209,7 +211,7 @@ docker image prune -f
 │   └── routers/
 │       ├── auth.py       /auth 路由（使用者）
 │       ├── credential.py /api 路由（Skill）
-│       └── admin.py      /admin 路由（管理員）
+│       └── admin.py      /api/admin 路由（管理員）
 ├── admin-frontend/       Vue 3 SPA（Element Plus + Pinia）
 ├── scripts/
 │   └── chunk_model.py    PBI JSON 解析核心（後端 import + CLI 兩用）

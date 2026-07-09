@@ -8,18 +8,20 @@ PBI Credential 申請程式：管理使用者身份、發放 Power BI 存取憑�
 ## 架構
 
 ```
-FastAPI 後端          Vue 3 SPA（同一 origin）
-  /auth/*  → 使用者自助（註冊、登入、領取 key）
-  /api/*   → Skill 呼叫（憑證 & 語意模型）
-  /admin/* → 管理後台（CRUD、模型上傳）
+FastAPI 後端                Vue 3 SPA（同一 origin）
+  /auth/*      → 使用者自助（註冊、登入、領取 key）
+  /api/*       → Skill 呼叫（憑證 & 語意模型）
+  /api/admin/* → 管理後台 API（CRUD、模型上傳）
 ```
+
+前端頁面路徑 `/admin/*`（`/admin/login`、`/admin/users` 等）與後端管理 API 路徑 `/api/admin/*` **刻意分開**，避免整頁重整 / 直接輸入網址時，瀏覽器的 GET 請求被同名的後端 API route 攔截而拿到 JSON 而非 SPA。
 
 ## 認證設計
 
 | 對象 | 方式 |
 |------|------|
-| 管理員 SPA | POST /admin/login（ADMIN_SECRET） → 1 hr HS256 JWT，Bearer |
-| 使用者 SPA | POST /auth/token（帳密） → user session JWT，Bearer |
+| 管理員 SPA | POST /api/admin/login（ADMIN_SECRET） → 1 hr HS256 JWT，Bearer |
+| 使用者 SPA | POST /auth/login（帳密） → user session JWT，Bearer |
 | Skill API | Authorization: Bearer \<PBI_MASK_KEY\>（SHA-256 hash 存 DB） |
 
 ## 關鍵安全細節
@@ -62,7 +64,7 @@ app/
   routers/
     auth.py        /auth（使用者）
     credential.py  /api（Skill）
-    admin.py       /admin（管理員）
+    admin.py       /api/admin（管理員）
 admin-frontend/    Vue 3 SPA（Element Plus + Pinia）
 scripts/
   chunk_model.py   離線工具：將原始 PBI JSON 拆分成 relationships + tables
@@ -73,14 +75,18 @@ docs/
 ## 前端路由規劃
 
 ```
-/login          管理員登入
-/users          使用者管理（管理員）
-/pbi-configs    PBI 設定管理（管理員）
-/model          語意模型管理（管理員）
---- 待開發 ---
-/register       使用者自助註冊
-/dashboard      使用者登入後首頁（查看憑證狀態、領取 key）
+/login              使用者登入
+/register           使用者自助註冊
+/dashboard          使用者登入後首頁（查看憑證狀態、領取 key）
+
+/admin              重導向至 /admin/login
+/admin/login        管理員登入
+/admin/users        使用者管理（管理員）
+/admin/pbi-configs  PBI 設定管理（管理員）
+/admin/model        語意模型管理（管理員）
 ```
+
+管理員與使用者的 JWT 過期時，`admin-frontend/src/api/http.ts` 的 axios response 攔截器會在收到 401 時清除 token 並導回對應登入頁（管理員 → `/admin/login`）。**修改前端後必須執行 `npm run build --prefix admin-frontend` 重新產生 `dist/`**，否則 FastAPI 會繼續 serve 舊的靜態檔案，導致行為與原始碼不一致（例如導向錯誤的登入頁）。
 
 ## Docker 部署
 

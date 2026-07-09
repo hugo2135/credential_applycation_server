@@ -2,7 +2,7 @@ import axios from 'axios'
 import { useAuthStore } from '@/stores/auth'
 import router from '@/router'
 
-const http = axios.create({ baseURL: '/admin' })
+const http = axios.create({ baseURL: '/api/admin' })
 
 http.interceptors.request.use((config) => {
   const store = useAuthStore()

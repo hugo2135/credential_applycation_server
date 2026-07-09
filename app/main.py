@@ -101,7 +101,7 @@ if os.path.isdir(FRONTEND_DIST):
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def serve_spa(full_path: str):
-        if full_path.startswith(("api/", "auth/", "admin/", "health")):
+        if full_path.startswith(("api/", "auth/", "health")):
             raise HTTPException(status_code=404, detail="Not Found")
         return FileResponse(
             os.path.join(FRONTEND_DIST, "index.html"),
