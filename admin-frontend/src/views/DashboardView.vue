@@ -118,8 +118,23 @@ async function issueKey() {
 }
 
 async function copyKey() {
-  await navigator.clipboard.writeText(newKey.value)
-  ElMessage.success('已複製到剪貼簿')
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(newKey.value)
+    } else {
+      const textarea = document.createElement('textarea')
+      textarea.value = newKey.value
+      textarea.style.position = 'fixed'
+      textarea.style.opacity = '0'
+      document.body.appendChild(textarea)
+      textarea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textarea)
+    }
+    ElMessage.success('已複製到剪貼簿')
+  } catch {
+    ElMessage.error('複製失敗，請手動選取金鑰複製')
+  }
 }
 
 onMounted(loadMe)
