@@ -109,20 +109,20 @@
           :data="versions"
           v-loading="loadingVersions"
           border
-          row-key="model_version"
+          row-key="id"
           @expand-change="handleExpand"
         >
           <el-table-column type="expand">
             <template #default="{ row }">
               <div style="padding: 8px 16px">
-                <div v-if="!details[row.model_version]" style="color: #909399; font-size: 13px">載入中…</div>
+                <div v-if="!details[row.id]" style="color: #909399; font-size: 13px">載入中…</div>
                 <template v-else>
                   <div style="font-size: 13px; color: #606266; margin-bottom: 6px">
-                    {{ details[row.model_version]?.table_count }} 張表・
-                    {{ details[row.model_version]?.relationship_count }} 個關聯
+                    {{ details[row.id]?.table_count }} 張表・
+                    {{ details[row.id]?.relationship_count }} 個關聯
                   </div>
                   <el-tag
-                    v-for="t in details[row.model_version]?.tables"
+                    v-for="t in details[row.id]?.tables"
                     :key="t"
                     size="small"
                     style="margin: 2px"
@@ -138,14 +138,14 @@
 
           <el-table-column label="名稱" min-width="110">
             <template #default="{ row }">
-              <template v-if="editingVersion === row.model_version">
+              <template v-if="editingId === row.id">
                 <el-input
                   v-model="editingName"
                   size="small"
                   autofocus
                   @blur="saveRename(row)"
                   @keyup.enter="saveRename(row)"
-                  @keyup.esc="editingVersion = null"
+                  @keyup.esc="editingId = null"
                 />
               </template>
               <span
@@ -220,6 +220,7 @@ interface PbiConfig {
   name: string
 }
 interface Version {
+  id: string
   model_version: number
   name: string | null
   model_description: string | null
@@ -250,10 +251,10 @@ const parseError   = ref('')
 const uploading    = ref(false)
 const versions     = ref<Version[]>([])
 const loadingVersions = ref(false)
-const details      = ref<Record<number, Detail>>({})
-const editingVersion = ref<number | null>(null)
+const details      = ref<Record<string, Detail>>({})
+const editingId      = ref<string | null>(null)
 const editingName    = ref('')
-const descDialog     = ref({ visible: false, loading: false, version: 0, text: '' })
+const descDialog     = ref({ visible: false, loading: false, id: '', text: '' })
 
 function fmtDate(d: string) {
   return new Date(d).toLocaleString()
@@ -335,26 +336,26 @@ async function loadVersions() {
 }
 
 async function handleExpand(row: Version, expandedRows: Version[]) {
-  if (!expandedRows.find(r => r.model_version === row.model_version)) return
-  if (details.value[row.model_version]) return
+  if (!expandedRows.find(r => r.id === row.id)) return
+  if (details.value[row.id]) return
   try {
-    const res = await http.get(`/model/versions/${row.model_version}`)
-    details.value[row.model_version] = res.data
+    const res = await http.get(`/model/versions/${row.id}`)
+    details.value[row.id] = res.data
   } catch {
     ElMessage.error('載入版本詳情失敗')
   }
 }
 
 function startRename(row: Version) {
-  editingVersion.value = row.model_version
+  editingId.value = row.id
   editingName.value = row.name ?? ''
 }
 
 async function saveRename(row: Version) {
-  if (editingVersion.value !== row.model_version) return
-  editingVersion.value = null
+  if (editingId.value !== row.id) return
+  editingId.value = null
   try {
-    await http.patch(`/model/versions/${row.model_version}`, { name: editingName.value || null })
+    await http.patch(`/model/versions/${row.id}`, { name: editingName.value || null })
     row.name = editingName.value || null
   } catch {
     ElMessage.error('改名失敗')
@@ -363,7 +364,7 @@ async function saveRename(row: Version) {
 
 async function exportVersion(row: Version) {
   try {
-    const res = await http.get(`/model/versions/${row.model_version}/export`, { responseType: 'blob' })
+    const res = await http.get(`/model/versions/${row.id}/export`, { responseType: 'blob' })
     const url = URL.createObjectURL(new Blob([res.data], { type: 'application/json' }))
     const a = document.createElement('a')
     a.href = url
@@ -377,14 +378,14 @@ async function exportVersion(row: Version) {
 }
 
 function openDescDialog(row: Version) {
-  descDialog.value = { visible: true, loading: false, version: row.model_version, text: row.model_description ?? '' }
+  descDialog.value = { visible: true, loading: false, id: row.id, text: row.model_description ?? '' }
 }
 
 async function saveDescription() {
   descDialog.value.loading = true
   try {
-    await http.patch(`/model/versions/${descDialog.value.version}`, { model_description: descDialog.value.text || null })
-    const row = versions.value.find(v => v.model_version === descDialog.value.version)
+    await http.patch(`/model/versions/${descDialog.value.id}`, { model_description: descDialog.value.text || null })
+    const row = versions.value.find(v => v.id === descDialog.value.id)
     if (row) row.model_description = descDialog.value.text || null
     ElMessage.success('模型說明已儲存')
     descDialog.value.visible = false
@@ -397,9 +398,9 @@ async function saveDescription() {
 
 async function deleteVersion(row: Version) {
   try {
-    await http.delete(`/model/versions/${row.model_version}`)
+    await http.delete(`/model/versions/${row.id}`)
     ElMessage.success(`版本 ${row.model_version} 已刪除`)
-    delete details.value[row.model_version]
+    delete details.value[row.id]
     await loadVersions()
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail ?? '刪除失敗')

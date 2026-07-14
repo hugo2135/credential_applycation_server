@@ -265,7 +265,12 @@ def upload_model(
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"JSON 解析失敗：{e}")
 
-    latest = db.query(ModelChunk).order_by(ModelChunk.model_version.desc()).first()
+    latest = (
+        db.query(ModelChunk)
+        .filter(ModelChunk.pbi_config_id == body.pbi_config_id)
+        .order_by(ModelChunk.model_version.desc())
+        .first()
+    )
     next_version = (latest.model_version + 1) if latest else 1
 
     if not db.query(PbiConfig).filter(PbiConfig.id == body.pbi_config_id).first():
@@ -302,6 +307,7 @@ def list_model_versions(
     chunks = q.order_by(ModelChunk.model_version.desc()).all()
     return [
         {
+            "id": c.id,
             "model_version": c.model_version,
             "name": c.name,
             "model_description": c.model_description,
@@ -314,16 +320,17 @@ def list_model_versions(
     ]
 
 
-@router.get("/model/versions/{version}")
+@router.get("/model/versions/{chunk_id}")
 def get_model_version(
-    version: int,
+    chunk_id: str,
     _: dict = Depends(_require_admin_jwt),
     db: Session = Depends(get_db),
 ):
-    chunk = db.query(ModelChunk).filter(ModelChunk.model_version == version).first()
+    chunk = db.query(ModelChunk).filter(ModelChunk.id == chunk_id).first()
     if not chunk:
         raise HTTPException(status_code=404, detail="版本不存在")
     return {
+        "id": chunk.id,
         "model_version": chunk.model_version,
         "name": chunk.name,
         "model_description": chunk.model_description,
@@ -334,14 +341,14 @@ def get_model_version(
     }
 
 
-@router.patch("/model/versions/{version}")
+@router.patch("/model/versions/{chunk_id}")
 def rename_model_version(
-    version: int,
+    chunk_id: str,
     body: RenameVersionRequest,
     _: dict = Depends(_require_admin_jwt),
     db: Session = Depends(get_db),
 ):
-    chunk = db.query(ModelChunk).filter(ModelChunk.model_version == version).first()
+    chunk = db.query(ModelChunk).filter(ModelChunk.id == chunk_id).first()
     if not chunk:
         raise HTTPException(status_code=404, detail="版本不存在")
     chunk.name = body.name
@@ -351,13 +358,13 @@ def rename_model_version(
     return {"message": "已更新版本資訊"}
 
 
-@router.get("/model/versions/{version}/export")
+@router.get("/model/versions/{chunk_id}/export")
 def export_model_version(
-    version: int,
+    chunk_id: str,
     _: dict = Depends(_require_admin_jwt),
     db: Session = Depends(get_db),
 ):
-    chunk = db.query(ModelChunk).filter(ModelChunk.model_version == version).first()
+    chunk = db.query(ModelChunk).filter(ModelChunk.id == chunk_id).first()
     if not chunk:
         raise HTTPException(status_code=404, detail="版本不存在")
     payload = {
@@ -367,7 +374,7 @@ def export_model_version(
         "relationships": chunk.relationships,
         "tables": chunk.tables,
     }
-    filename = f"model_v{version}.json"
+    filename = f"model_v{chunk.model_version}.json"
     return Response(
         content=json.dumps(payload, ensure_ascii=False, indent=2),
         media_type="application/json",
@@ -375,13 +382,13 @@ def export_model_version(
     )
 
 
-@router.delete("/model/versions/{version}", status_code=204)
+@router.delete("/model/versions/{chunk_id}", status_code=204)
 def delete_model_version(
-    version: int,
+    chunk_id: str,
     _: dict = Depends(_require_admin_jwt),
     db: Session = Depends(get_db),
 ):
-    chunk = db.query(ModelChunk).filter(ModelChunk.model_version == version).first()
+    chunk = db.query(ModelChunk).filter(ModelChunk.id == chunk_id).first()
     if not chunk:
         raise HTTPException(status_code=404, detail="版本不存在")
     db.delete(chunk)
