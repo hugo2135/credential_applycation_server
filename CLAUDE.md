@@ -3,15 +3,18 @@
 ## 專案定位
 
 PBI Credential 申請程式：管理使用者身份、發放 Power BI 存取憑證、集中管理語意模型。
-供 nl-to-dax Skill 透過 PBI_MASK_KEY 呼叫兩支核心 API。
+供 nl-to-dax Skill 呼叫，主要透過 **MCP（OAuth 保護）**，legacy 流程用 PBI_MASK_KEY 呼叫 REST API。
 
 ## 架構
 
 ```
-FastAPI 後端                Vue 3 SPA（同一 origin）
-  /auth/*      → 使用者自助（註冊、登入、領取 key）
-  /api/*       → Skill 呼叫（憑證 & 語意模型）
-  /api/admin/* → 管理後台 API（CRUD、模型上傳）
+FastAPI 後端                 Vue 3 SPA（同一 origin）
+  /auth/*        → 使用者自助（註冊、登入、領取 key，legacy）
+  /api/*         → Skill legacy 呼叫（憑證 & 語意模型，逐步淘汰中）
+  /api/admin/*   → 管理後台 API（CRUD、模型上傳）
+  /oauth/*       → OAuth 2.1 authorization server（DCR/authorize/token，給 MCP 用）
+  /.well-known/* → OAuth/MCP metadata（RFC 8414、RFC 9728）
+  /mcp           → MCP server（Streamable HTTP，Bearer token 保護）
 ```
 
 前端頁面路徑 `/admin/*`（`/admin/login`、`/admin/users` 等）與後端管理 API 路徑 `/api/admin/*` **刻意分開**，避免整頁重整 / 直接輸入網址時，瀏覽器的 GET 請求被同名的後端 API route 攔截而拿到 JSON 而非 SPA。
@@ -22,14 +25,26 @@ FastAPI 後端                Vue 3 SPA（同一 origin）
 |------|------|
 | 管理員 SPA | POST /api/admin/login（ADMIN_SECRET） → 1 hr HS256 JWT，Bearer |
 | 使用者 SPA | POST /auth/login（帳密） → user session JWT，Bearer |
-| Skill API | Authorization: Bearer \<PBI_MASK_KEY\>（SHA-256 hash 存 DB） |
+| MCP connector | OAuth 2.1 + PKCE（`/oauth/authorize` 沿用使用者帳密登入）→ 1 hr access JWT + 90 天 refresh token（每次使用輪換，只存 hash） |
+| Skill API（legacy） | Authorization: Bearer \<PBI_MASK_KEY\>（SHA-256 hash 存 DB） |
 
 ## 關鍵安全細節
 
-- `SERVER_JWT_SECRET`：**動態讀取**（`_get_secret()`），禁止 module-level 常數，避免 .env 載入時序問題。
+- `SERVER_JWT_SECRET`：**動態讀取**（`_get_secret()`），禁止 module-level 常數，避免 .env 載入時序問題。也是 MCP access token 的簽章金鑰。
 - `datetime.now(timezone.utc)`：JWT 時間戳**必須**用這個，`utcnow()` 在 UTC+8 環境會讓 exp 提前 7 小時失效。
 - `client_secret` 以 AES-256-GCM 加密存 DB，key 衍生自 `SERVER_JWT_SECRET`。
-- PBI_MASK_KEY 明文只在產生時回傳一次，DB 只存 SHA-256 hash。
+- PBI_MASK_KEY 明文只在產生時回傳一次，DB 只存 SHA-256 hash；OAuth refresh token 比照辦理，只存 hash。
+- MCP tool（`run_dax_query`）在 server 端完成 Azure AD 換 token + 呼叫 Power BI，access token 不會回傳給 MCP client，Skill 端完全不碰任何 Azure AD 憑證。
+- OAuth client 一律走 Dynamic Client Registration + PKCE（public client，不核發 client_secret）。
+
+## 分支策略
+
+1. `main` 必須隨時保持可直接部署——VM 是直接 `git pull` 這個分支上線的，任何未完成/未測試的功能不上 `main`。
+2. 跟目前開發中大型功能無關的一般性 bug fix、小改動，直接對 `main` 提交，不用等大型功能做完。
+3. 大型功能（例如 MCP）開一個專屬 epic 分支（如 `feature/oauth-mcp`），可以橫跨多個階段、多個 session 持續累積工作，不需要每個小階段就急著合併回去。
+4. Epic 分支要**定期**把 `main` merge 進來吸收無關的核心修正，避免分岔太久難合併——尤其如果 epic 分支有動到共用核心檔案（如這次 MCP 動到的 `models.py`、`main.py`、`credential.py`、`security.py`），不是獨立新檔案能完全隔開的。
+5. Epic 功能穩定到可以正式提供給使用者用時，整個合併回 `main`，分支才算完成任務。
+6. Commit message：涉及安全性修正時不描述具體弱點細節，一般功能改動正常描述即可。
 
 ## 開發啟動
 
@@ -49,26 +64,32 @@ npm run dev            # 同時啟動 uvicorn + Vite dev server
 
 | 變數 | 說明 |
 |------|------|
-| `SERVER_JWT_SECRET` | 主金鑰，64 字元隨機 hex。JWT 簽發 + AES-256 key derivation |
+| `SERVER_JWT_SECRET` | 主金鑰，64 字元隨機 hex。JWT 簽發 + AES-256 key derivation，也是 MCP access token 簽章金鑰 |
 | `ADMIN_SECRET` | 管理後台登入密碼 |
 | `DATABASE_URL` | 預設 `sqlite:///./credential.db` |
+| `SITE_DOMAIN` | 對外網域（不可為裸 IP）。Caddy 拿來申請 HTTPS 憑證，也是 OAuth issuer / MCP resource URL 的基礎 |
+| `ALLOWED_IPS` | IP 白名單，逗號分隔，留空不限制 |
 
 ## 目錄結構
 
 ```
 app/
-  main.py          FastAPI 入口（CORS、SPA static）
-  security.py      JWT、密碼、AES
-  models.py        SQLAlchemy ORM
+  main.py          FastAPI 入口（CORS、SPA static、MCP mount + lifespan）
+  security.py      JWT、密碼、AES、PKCE 驗證、MCP token 簽發
+  models.py        SQLAlchemy ORM（含 OAuth 三張表）
   database.py      SQLAlchemy 設定
   routers/
     auth.py        /auth（使用者）
-    credential.py  /api（Skill）
+    credential.py  /api（Skill legacy），也提供 acquire_powerbi_token/execute_dax_query 給 MCP 用
     admin.py       /api/admin（管理員）
+    oauth.py       /oauth、/.well-known（OAuth 2.1 authorization server）
+    mcp.py         /mcp（MCP server + tools：list_models/get_model_detail/run_dax_query）
 admin-frontend/    Vue 3 SPA（Element Plus + Pinia）
 scripts/
   chunk_model.py   離線工具：將原始 PBI JSON 拆分成 relationships + tables
+tests/             pytest（OAuth flow + MCP 協定完整往返測試，跑法見 README）
 docs/
+  skill-integration.md  Skill 串接指南（MCP 為主，legacy REST API 為輔）
   plan.md          初期規劃文件（歷史參考）
 ```
 
@@ -98,3 +119,5 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
 `admin-frontend/dist/` 存在時，FastAPI 自動 mount 靜態檔案並加 catch-all 回傳 `index.html`。
+
+服務前面掛 [Caddy](https://caddyserver.com/)（見 [Caddyfile](Caddyfile)）做 TLS termination，自動跟 Let's Encrypt 要憑證並續約。`app` 容器改成 `expose`、不直接對外發布 port，對外只開 80/443，一律經過 Caddy 反向代理——**這代表 `.env` 一定要有 `SITE_DOMAIN`**（不能是裸 IP，沒域名可先用 `<IP 把 . 換成 ->.sslip.io` 頂著），Caddy 第一次啟動需要 80/443 對外可連才能完成 ACME 驗證。改動 `docker-compose.yml`/`Caddyfile`/新增 router 後要 `docker compose up --build -d`（單純 `up` 不會重建 image）。

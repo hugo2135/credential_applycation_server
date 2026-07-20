@@ -53,3 +53,40 @@ class ModelChunk(Base):
     relationships = Column(JSON, nullable=False)
     tables = Column(JSON, nullable=False)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
+
+
+class OAuthClient(Base):
+    """MCP connector 端透過 Dynamic Client Registration 自行註冊的 client（public client，靠 PKCE 保護，不存 secret）。"""
+    __tablename__ = "oauth_clients"
+
+    client_id = Column(String, primary_key=True, default=new_uuid)
+    client_name = Column(String, nullable=True)
+    redirect_uris = Column(JSON, nullable=False)  # list[str]
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class OAuthAuthorizationCode(Base):
+    """短效期一次性 authorization code，換 access token 用（PKCE S256）。"""
+    __tablename__ = "oauth_authorization_codes"
+
+    code = Column(String, primary_key=True)
+    client_id = Column(String, ForeignKey("oauth_clients.client_id"), nullable=False, index=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    redirect_uri = Column(String, nullable=False)
+    code_challenge = Column(String, nullable=False)
+    code_challenge_method = Column(String, nullable=False, default="S256")
+    expires_at = Column(DateTime, nullable=False)
+    used = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class OAuthRefreshToken(Base):
+    """長效 refresh token，明文只在核發當下回傳一次，DB 只存 hash（比照 PBI_MASK_KEY 的作法）。"""
+    __tablename__ = "oauth_refresh_tokens"
+
+    token_hash = Column(String, primary_key=True)
+    client_id = Column(String, ForeignKey("oauth_clients.client_id"), nullable=False, index=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    revoked = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)

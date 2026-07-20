@@ -1,4 +1,5 @@
 from datetime import datetime
+import httpx
 import msal
 from fastapi import APIRouter, Depends, HTTPException, Query, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -47,6 +48,51 @@ def _check_user_credentials(user: User):
         raise HTTPException(status_code=503, detail="Azure AD 憑證尚未設定，請聯絡管理員")
 
 
+def acquire_powerbi_token(user: User) -> dict:
+    client_secret = decrypt_secret(user.client_secret_enc)
+    msal_app = msal.ConfidentialClientApplication(
+        client_id=user.client_id,
+        authority=f"https://login.microsoftonline.com/{user.tenant_id}",
+        client_credential=client_secret,
+    )
+    result = msal_app.acquire_token_for_client(scopes=_POWERBI_SCOPE)
+    if "access_token" not in result:
+        error = result.get("error_description", result.get("error", "未知錯誤"))
+        raise HTTPException(status_code=502, detail=f"Azure AD 驗證失敗：{error}")
+    return result
+
+
+def execute_dax_query(user: User, config: PbiConfig, dax: str) -> list[dict]:
+    """對指定 pbi_config 執行 DAX 查詢，回傳結果列（list of dict）。"""
+    if not config.workspace_id or not config.dataset_id:
+        raise HTTPException(status_code=503, detail="PBI 工作區尚未設定完成，請聯絡管理員")
+
+    access_token = acquire_powerbi_token(user)["access_token"]
+    url = f"https://api.powerbi.com/v1.0/myorg/groups/{config.workspace_id}/datasets/{config.dataset_id}/executeQueries"
+    body = {
+        "queries": [{"query": dax}],
+        "serializerSettings": {"includeNulls": True},
+    }
+    try:
+        resp = httpx.post(
+            url,
+            json=body,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=60,
+        )
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"呼叫 Power BI API 失敗：{e}")
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Power BI 查詢失敗（{resp.status_code}）：{resp.text}")
+
+    data = resp.json()
+    try:
+        return data["results"][0]["tables"][0]["rows"]
+    except (KeyError, IndexError):
+        raise HTTPException(status_code=502, detail="Power BI 回傳格式異常")
+
+
 @router.get("/models")
 def get_models(
     user: User = Depends(_resolve_user),
@@ -88,17 +134,7 @@ def get_token(
     if not config.workspace_id or not config.dataset_id:
         raise HTTPException(status_code=503, detail="PBI 工作區尚未設定完成，請聯絡管理員")
 
-    client_secret = decrypt_secret(user.client_secret_enc)
-    msal_app = msal.ConfidentialClientApplication(
-        client_id=user.client_id,
-        authority=f"https://login.microsoftonline.com/{user.tenant_id}",
-        client_credential=client_secret,
-    )
-    result = msal_app.acquire_token_for_client(scopes=_POWERBI_SCOPE)
-
-    if "access_token" not in result:
-        error = result.get("error_description", result.get("error", "未知錯誤"))
-        raise HTTPException(status_code=502, detail=f"Azure AD 驗證失敗：{error}")
+    result = acquire_powerbi_token(user)
 
     latest = (
         db.query(ModelChunk)

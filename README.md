@@ -6,9 +6,12 @@
 
 ```
 FastAPI 後端
-  /auth/*       → 使用者自助（註冊、登入、領取 PBI_MASK_KEY）
-  /api/*        → Skill 呼叫（取得 Azure AD token & 語意模型）
+  /auth/*       → 使用者自助（註冊、登入、領取 PBI_MASK_KEY，legacy 流程用）
+  /api/*        → Skill 呼叫（取得 Azure AD token & 語意模型，legacy 流程，逐步淘汰中）
   /api/admin/*  → 管理後台 API（CRUD、模型上傳）
+  /oauth/*      → OAuth 2.1 授權伺服器（給 MCP connector 用，DCR/authorize/token）
+  /.well-known/*→ OAuth / MCP metadata（RFC 8414、RFC 9728）
+  /mcp          → MCP server（Streamable HTTP，OAuth Bearer token 保護）
 
 Vue 3 SPA（同一 origin）
   /login, /register, /dashboard  → 使用者頁面
@@ -16,6 +19,10 @@ Vue 3 SPA（同一 origin）
 ```
 
 前端頁面路徑 `/admin/*` 與後端管理 API 路徑 `/api/admin/*` 刻意分開，避免整頁重整／直接輸入網址時，請求被同名後端路由攔截而拿到 JSON 而非 SPA 頁面。
+
+**Skill 端的兩種整合方式**：
+- **MCP（推薦，新開發用這個）**：Claude／其他支援 MCP 的 client 透過 `/mcp` 走 OAuth 連線，不需要使用者手動申請、複製、貼上任何金鑰。詳見 [docs/skill-integration.md](docs/skill-integration.md)。
+- **REST API + PBI_MASK_KEY（legacy）**：`/api/*` 這組端點仍保留運作，但屬於舊流程，新 skill 開發不建議再串這條路——在 Claude Apps 的 sandbox 環境下，本機寫入的 `PBI_MASK_KEY` 每次對話都會消失，這正是導入 MCP 的原因。
 
 ### 安全設計重點
 
@@ -67,10 +74,11 @@ docker compose up -d
 
 | 變數 | 說明 |
 |------|------|
-| `SERVER_JWT_SECRET` | 主要金鑰，64 字元隨機 hex。JWT 簽發 + AES-256-GCM key derivation |
+| `SERVER_JWT_SECRET` | 主要金鑰，64 字元隨機 hex。JWT 簽發 + AES-256-GCM key derivation，也是 MCP access token 的簽章金鑰 |
 | `ADMIN_SECRET` | 管理後台登入密碼 |
 | `DATABASE_URL` | 資料庫連線字串（預設 `sqlite:///./credential.db`） |
 | `ALLOWED_IPS` | IP 白名單，逗號分隔。留空表示不限制（例：`1.2.3.4,5.6.7.8`） |
+| `SITE_DOMAIN` | 對外網域（不能是裸 IP），Caddy 用來申請 HTTPS 憑證，也是 OAuth issuer / MCP resource URL 的基礎 |
 
 產生安全的隨機金鑰：
 ```bash
@@ -110,7 +118,29 @@ python -c "import secrets; print(secrets.token_hex(32))"
 }
 ```
 
-Skill 用 `access_token` + `workspace_id` + `dataset_id` 直接對 Power BI Execute Queries API 執行 DAX 查詢。詳見 [docs/skill-integration.md](docs/skill-integration.md)。
+Skill 用 `access_token` + `workspace_id` + `dataset_id` 直接對 Power BI Execute Queries API 執行 DAX 查詢。
+
+> ⚠️ 上面這兩支是 **legacy** 端點，新的 skill 整合請改走下方的 MCP。詳見 [docs/skill-integration.md](docs/skill-integration.md)。
+
+### OAuth（`/oauth/*`、`/.well-known/*`）— 給 MCP connector 用
+
+| 方法 | 路徑 | 說明 |
+|------|------|------|
+| GET | `/.well-known/oauth-authorization-server` | RFC 8414 metadata |
+| GET | `/.well-known/oauth-protected-resource`（含 `/mcp` 後綴版本） | RFC 9728 metadata，指向本 server 當 authorization server |
+| POST | `/oauth/register` | Dynamic Client Registration（RFC 7591），public client，不需 secret |
+| GET / POST | `/oauth/authorize` | 登入（沿用 `/auth/login` 帳密驗證）+ 同意畫面，核准後發 authorization code |
+| POST | `/oauth/token` | `authorization_code`（PKCE S256 必要）或 `refresh_token` grant，換 access token |
+
+Access token 是 1 小時效期的 JWT；refresh token 90 天效期、每次使用會輪換（舊的立即失效）。使用者必須先完成一般的註冊＋管理員審核流程才能在 `/oauth/authorize` 登入成功——OAuth 這層不會繞過帳號審核。
+
+### MCP（`/mcp`，Bearer 保護）
+
+| Tool | 參數 | 說明 |
+|------|------|------|
+| `list_models` | 無 | 列出使用者可存取的模型（輕量版：id、名稱、說明、表數量） |
+| `get_model_detail` | `pbi_config_id` | 取得完整 relationships + tables 結構 |
+| `run_dax_query` | `pbi_config_id`, `dax` | 在 server 端完成 Azure AD 換 token + 呼叫 Power BI executeQueries，直接回傳查詢結果列 |
 
 ### 使用者 API（`/auth/*`）
 
@@ -175,6 +205,9 @@ python scripts/chunk_model.py path/to/model.json
 | `pbi_config` | Power BI 連線設定（workspace_id、dataset_id） |
 | `user_pbi_configs` | 使用者與 PBI 設定的多對多指派關係 |
 | `model_chunks` | 語意模型版本（版本號、名稱、pbi_config_id、relationships JSON、tables JSON） |
+| `oauth_clients` | MCP connector 透過 DCR 註冊的 client（public client，不存 secret） |
+| `oauth_authorization_codes` | 短效期一次性 authorization code（PKCE challenge、5 分鐘過期、用過即作廢） |
+| `oauth_refresh_tokens` | 長效 refresh token（只存 hash，90 天效期，每次使用輪換） |
 
 ## Docker 部署
 
@@ -206,24 +239,38 @@ docker image prune -f
 
 ```
 ├── app/
-│   ├── main.py           FastAPI 入口（CORS、SPA 靜態服務、DB migration、IP 白名單）
+│   ├── main.py           FastAPI 入口（CORS、SPA 靜態服務、DB migration、IP 白名單、MCP mount + lifespan）
 │   ├── database.py       SQLAlchemy 設定
-│   ├── models.py         ORM 資料模型
-│   ├── security.py       密碼 hash、JWT 簽發、AES 加解密
+│   ├── models.py         ORM 資料模型（含 OAuth 相關表）
+│   ├── security.py       密碼 hash、JWT 簽發、AES 加解密、PKCE 驗證、MCP token 簽發
 │   └── routers/
 │       ├── auth.py       /auth 路由（使用者）
-│       ├── credential.py /api 路由（Skill）
-│       └── admin.py      /api/admin 路由（管理員）
+│       ├── credential.py /api 路由（Skill legacy，也提供 acquire_powerbi_token/execute_dax_query 給 MCP 用）
+│       ├── admin.py      /api/admin 路由（管理員）
+│       ├── oauth.py      /oauth、/.well-known 路由（OAuth 2.1 authorization server）
+│       └── mcp.py        /mcp 路由（MCP server + tools）
 ├── admin-frontend/       Vue 3 SPA（Element Plus + Pinia）
 ├── scripts/
 │   └── chunk_model.py    PBI JSON 解析核心（後端 import + CLI 兩用）
+├── tests/                pytest 套件（OAuth flow + MCP 協定完整往返測試）
 ├── docs/
-│   └── skill-integration.md  Skill 串接指南
+│   └── skill-integration.md  Skill 串接指南（MCP 為主，legacy REST API 為輔）
 ├── Dockerfile
 ├── docker-compose.yml
+├── Caddyfile             TLS termination（Let's Encrypt 自動憑證）
 ├── package.json          concurrently dev script（npm run dev）
 ├── requirements.txt
+├── requirements-dev.txt  requirements.txt + pytest
 └── .env.example
 ```
+
+## 測試
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ -v
+```
+
+涵蓋完整 OAuth flow（DCR → authorize → PKCE → token → refresh 輪換 → 重放防護）與完整 MCP 協定往返（真實啟動 uvicorn + `mcp` client SDK 連線、list tools、call tool、權限檢查）。
 
 > 開發者請參閱 [CLAUDE.md](CLAUDE.md) 取得認證設計、關鍵安全細節與啟動流程。

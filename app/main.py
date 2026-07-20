@@ -2,13 +2,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from sqlalchemy import text
 from app.database import engine, Base
-from app.routers import auth, credential, admin
+from app.routers import auth, credential, admin, oauth
+from app.routers import mcp as mcp_router
 
 _raw_ips = os.getenv("ALLOWED_IPS", "")
 ALLOWED_IPS: set[str] = {ip.strip() for ip in _raw_ips.split(",") if ip.strip()}
@@ -63,7 +65,16 @@ with engine.connect() as _conn:
         except Exception:
             pass
 
-app = FastAPI(title="PBI Credential 申請程式", version="0.1.0")
+_mcp_server = mcp_router.get_mcp_server()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    async with _mcp_server.session_manager.run():
+        yield
+
+
+app = FastAPI(title="PBI Credential 申請程式", version="0.1.0", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -87,6 +98,18 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(credential.router)
 app.include_router(admin.router)
+app.include_router(oauth.router)
+
+
+@app.api_route("/mcp", methods=["GET", "POST", "DELETE"], include_in_schema=False)
+async def _mcp_no_trailing_slash(request: Request):
+    # Starlette 的 Mount 只認得帶尾斜線的 "/mcp/"，裸路徑 "/mcp" 不會進到 mount，
+    # 會被後面的 SPA catch-all 攔走變成 404。這裡先攔一手，307 保留 method/body 轉去 "/mcp/"。
+    query = f"?{request.url.query}" if request.url.query else ""
+    return RedirectResponse(url=f"/mcp/{query}", status_code=307)
+
+
+app.mount("/mcp", _mcp_server.streamable_http_app())
 
 
 @app.get("/health")
@@ -101,7 +124,7 @@ if os.path.isdir(FRONTEND_DIST):
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def serve_spa(full_path: str):
-        if full_path.startswith(("api/", "auth/", "health")):
+        if full_path.startswith(("api/", "auth/", "health", "oauth/", ".well-known/", "mcp")):
             raise HTTPException(status_code=404, detail="Not Found")
         return FileResponse(
             os.path.join(FRONTEND_DIST, "index.html"),

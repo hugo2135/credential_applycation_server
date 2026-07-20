@@ -92,6 +92,51 @@ def verify_admin_jwt(token: str) -> dict:
     return payload
 
 
+def issue_mcp_access_token(user_id: str, email: str, client_id: str) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": user_id,
+        "email": email,
+        "client_id": client_id,
+        "role": "mcp",
+        "iss": "oauth-access-token",
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(hours=1)).timestamp()),
+    }
+    return jwt.encode(payload, _get_secret(), algorithm=JWT_ALGORITHM)
+
+
+def verify_mcp_access_token(token: str) -> dict:
+    try:
+        payload = jwt.decode(token, _get_secret(), algorithms=[JWT_ALGORITHM])
+    except JWTError as e:
+        logger.error("MCP access token decode failed: %r", e)
+        raise HTTPException(status_code=401, detail="Access token invalid or expired")
+    if payload.get("role") != "mcp" or payload.get("iss") != "oauth-access-token":
+        raise HTTPException(status_code=401, detail="Access token invalid or expired")
+    return payload
+
+
+def generate_authorization_code() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def generate_refresh_token() -> str:
+    return secrets.token_hex(32)
+
+
+def hash_opaque_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def verify_pkce(code_verifier: str, code_challenge: str, method: str = "S256") -> bool:
+    if method != "S256":
+        return False
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    computed = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return secrets.compare_digest(computed, code_challenge)
+
+
 def _aes_key() -> bytes:
     raw = os.getenv("SERVER_JWT_SECRET", "fallback-key-change-me")
     return hashlib.sha256(raw.encode()).digest()  # 32 bytes → AES-256
