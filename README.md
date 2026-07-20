@@ -184,7 +184,7 @@ mkdir -p data
 
 # 設定環境變數
 cp .env.example .env
-# 編輯 .env
+# 編輯 .env，記得填 SITE_DOMAIN（Caddy 用來自動申請 HTTPS 憑證，不能是裸 IP）
 
 # 啟動
 docker compose up -d
@@ -192,6 +192,8 @@ docker compose up -d
 # 查看 log
 docker compose logs -f
 ```
+
+服務前面掛了 [Caddy](https://caddyserver.com/) 做 TLS termination，自動跟 Let's Encrypt 要憑證並自動續約（設定見 [Caddyfile](Caddyfile)）。對外只開 80/443，`app` 容器的 8000 port 不再直接對外暴露，一律經過 Caddy 反向代理。第一次啟動時 Caddy 需要 80/443 對外可連才能完成 ACME 驗證，記得 VM 防火牆/安全群組要開這兩個 port。
 
 更新部署：
 ```bash
