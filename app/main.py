@@ -83,7 +83,7 @@ async def ip_whitelist(request: Request, call_next):
         forwarded_for = request.headers.get("X-Forwarded-For")
         client_ip = forwarded_for.split(",")[0].strip() if forwarded_for else (request.client.host if request.client else "")
         if client_ip not in ALLOWED_IPS:
-            return JSONResponse(status_code=403, content={"detail": f"IP {client_ip} 不在白名單中"})
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
     return await call_next(request)
 
 
