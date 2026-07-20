@@ -77,9 +77,15 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="PBI Credential 申請程式", version="0.1.0", lifespan=lifespan)
 
 
+# OAuth/MCP 這幾條路徑本來就要給不特定第三方（使用者的瀏覽器、Claude 的伺服器）連，
+# 不可能限制在內網——安全性靠 OAuth 本身（PKCE + 登入 + 同意畫面）把關，不是靠 IP。
+# 其餘路徑（含 /admin/*、/auth/*）維持原本「僅限內網」的設計，不在這個排除清單內。
+_IP_WHITELIST_EXEMPT_PREFIXES = ("/oauth/", "/.well-known/", "/mcp")
+
+
 @app.middleware("http")
 async def ip_whitelist(request: Request, call_next):
-    if ALLOWED_IPS:
+    if ALLOWED_IPS and not request.url.path.startswith(_IP_WHITELIST_EXEMPT_PREFIXES):
         forwarded_for = request.headers.get("X-Forwarded-For")
         client_ip = forwarded_for.split(",")[0].strip() if forwarded_for else (request.client.host if request.client else "")
         if client_ip not in ALLOWED_IPS:
