@@ -6,6 +6,7 @@ from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.transport_security import TransportSecuritySettings
 
 from app.database import SessionLocal
 from app.models import ModelChunk, PbiConfig, User, UserPbiConfig
@@ -16,6 +17,21 @@ from app.security import verify_mcp_access_token
 def _issuer() -> str:
     domain = os.getenv("SITE_DOMAIN", "")
     return f"https://{domain}" if domain else "http://localhost:8000"
+
+
+def _allowed_hosts_and_origins() -> tuple[list[str], list[str]]:
+    # mcp SDK 內建 DNS rebinding 防護，預設 allowed_hosts/allowed_origins 是空清單
+    # （等於全擋），一定要把實際對外網域加進去，不然所有 /mcp 請求都會被判定
+    # Invalid Host header 而回 421。
+    domain = os.getenv("SITE_DOMAIN", "")
+    if domain:
+        # Origin 沒帶（server-to-server 呼叫常見）就直接放行，這裡的清單只在瀏覽器
+        # 端真的帶了 Origin header 時才用得到。claude.ai 是目前已知會用瀏覽器走 OAuth
+        # 流程的 client；之後如果其他 MCP client 也在瀏覽器端呼叫、被 Invalid Origin
+        # header 擋下，比照這裡加進去即可。
+        return [domain], [f"https://{domain}", "https://claude.ai"]
+    # 本機開發／測試 port 不固定（pytest 的 live_server 用 port=0 隨機挑），用 :* 萬用字元。
+    return ["localhost:*", "127.0.0.1:*"], ["http://localhost:*", "http://127.0.0.1:*"]
 
 
 class _JwtTokenVerifier(TokenVerifier):
@@ -67,6 +83,7 @@ def get_mcp_server() -> FastMCP:
         return _mcp_server
 
     issuer = _issuer()
+    allowed_hosts, allowed_origins = _allowed_hosts_and_origins()
     server = FastMCP(
         name="pbi-credential-mcp",
         instructions="查詢使用者被授權存取的 Power BI 語意模型結構，並取得執行 DAX 查詢所需的 access token（實際查詢由呼叫端直接對 Power BI REST API 執行）。",
@@ -74,6 +91,10 @@ def get_mcp_server() -> FastMCP:
         auth=AuthSettings(
             issuer_url=issuer,
             resource_server_url=f"{issuer}/mcp",
+        ),
+        transport_security=TransportSecuritySettings(
+            allowed_hosts=allowed_hosts,
+            allowed_origins=allowed_origins,
         ),
         # 這個 app 之後會被 main.py mount 在 /mcp 上，這裡的路徑要設成根路徑，
         # 不然對外實際路徑會變成 /mcp/mcp。
