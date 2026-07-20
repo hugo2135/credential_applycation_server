@@ -58,7 +58,7 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
 
 ### `get_model_detail`
 
-取得指定 PBI 設定的完整語意模型結構，DAX 生成前查表格/欄位/量值用。
+取得指定 PBI 設定的完整語意模型結構，DAX 生成前查表格/欄位/量值用，**也是查詢這個模型所需的 `workspace_id`/`dataset_id` 的來源**。
 
 **輸入**：`pbi_config_id: str`
 
@@ -68,6 +68,8 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
   "pbi_config_id": "550e8400-e29b-41d4-a716-446655440000",
   "pbi_config_name": "財務模型 A",
   "model_version": 5,
+  "workspace_id": "e6833b06-998f-45c2-a6c7-43a402d6e12e",
+  "dataset_id": "2097b78b-b3df-40f9-9478-680e324acd50",
   "relationships": {
     "relationships": [
       {
@@ -89,19 +91,42 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
 ```
 使用者沒有這個 `pbi_config_id` 的存取權時回 tool error（不會洩漏該設定是否存在）。
 
-### `run_dax_query`
+### `get_powerbi_token`
 
-對指定 PBI 設定執行 DAX 查詢。**Server 端會直接完成「向 Azure AD 換 token → 呼叫 Power BI executeQueries」整個流程，Skill 端從頭到尾不會拿到、也不需要處理任何 Azure AD access token。**
+取得指定 PBI 設定的 Power BI access token（server 端用使用者的 Azure AD 憑證去跟 Azure AD 換）。
 
-**輸入**：`pbi_config_id: str`, `dax: str`（完整 `EVALUATE` 查詢語法，跟 legacy 流程一樣的 DAX 撰寫規則）
+> ⚠️ **這支 tool 不執行查詢**。查詢是 Skill 自己拿這個 token 直接對 Power BI 的 `executeQueries` REST API 發請求——這是刻意的設計，不是漏做：如果讓 server 代為執行查詢並等待/轉發結果，並發多個查詢時會讓 server 端的同步網路呼叫互相卡住（甚至拖垮整個服務的回應能力，包含跟這次查詢完全無關的其他使用者）。Claude Apps 的沙盒環境本身可以直接呼叫外部 REST API（這不是問題），所以查詢執行放回 Skill 端執行對雙方都更安全、更好擴充。
 
-**輸出**：`list[dict]`，Power BI `executeQueries` 回傳的查詢結果列（`results[0].tables[0].rows`）。
+**輸入**：`pbi_config_id: str`
+
+**輸出**：`dict`
+```json
+{
+  "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9...",
+  "token_type": "Bearer",
+  "expires_in": 3599
+}
+```
+（不含 `workspace_id`/`dataset_id`，那兩個從 `get_model_detail` 拿，避免重複回傳同一份靜態資料。）
 
 **失敗情況**（皆為 tool error，訊息會說明原因）：
 - 使用者沒有該 `pbi_config_id` 的存取權
 - 使用者的 Azure AD 憑證尚未由管理員設定（`tenant_id`/`client_id`/`client_secret` 任一缺失）
-- PBI 工作區（workspace_id/dataset_id）尚未設定完成
-- Azure AD 驗證失敗、或 Power BI 查詢本身出錯（DAX 語法錯誤等）
+- Azure AD 驗證失敗（憑證錯誤、租戶設定問題等）
+
+**拿到 `access_token` 之後，Skill 自己直接打**：
+```
+POST https://api.powerbi.com/v1.0/myorg/groups/{workspace_id}/datasets/{dataset_id}/executeQueries
+Authorization: Bearer <access_token>
+Content-Type: application/json
+
+{
+  "queries": [{ "query": "<DAX>" }],
+  "serializerSettings": { "includeNulls": true }
+}
+```
+
+**Token 快取（重要，請務必實作）**：`access_token` 效期是 `expires_in` 秒（通常 3600）。Skill 應該在**同一個對話內**快取這個 token（記下拿到的時間 + `expires_in`，算出過期時間點，建議預留 1-2 分鐘安全邊界），同一個對話要連續查好幾次 DAX 時直接重複使用，**不要每次查詢前都呼叫一次 `get_powerbi_token`**。這個快取只能活在對話上下文裡，**不可以寫回本機檔案跨對話持久化**——那樣就繞回我們一開始要解決的 sandbox 憑證消失問題了。
 
 ---
 
@@ -115,19 +140,24 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
        │
        ├─ 只有一個模型 → 自動選定；多個 → 請使用者選
        ▼
-呼叫 get_model_detail(pbi_config_id)   ← 取得完整 relationships + tables
+呼叫 get_model_detail(pbi_config_id)   ← 取得完整 relationships + tables + workspace_id/dataset_id
        │
        ▼
 Skill 依現有推理邏輯（辨識資料表 → 驗證關聯 → 抽欄位/量值 → 生成 DAX）產出 DAX 查詢
        │
        ▼
-呼叫 run_dax_query(pbi_config_id, dax)   ← Server 端完成 Azure AD 換 token + 呼叫 Power BI
+手上有沒有還沒過期的 token？
+       ├─ 有 → 直接沿用
+       └─ 沒有/過期了 → 呼叫 get_powerbi_token(pbi_config_id) 拿新的
        │
        ▼
-拿到結構化查詢結果列，直接呈現給使用者
+Skill 自己直接對 Power BI executeQueries API 發送 DAX 查詢（不經過我們的 server）
+       │
+       ▼
+Power BI 直接把查詢結果回給 Skill，拿到結構化查詢結果列，呈現給使用者
 ```
 
-跟 legacy 流程相比，**Skill 完全不需要碰觸任何憑證**（PBI_MASK_KEY、Azure AD access token 都不會出現在 Skill 這端），也不需要寫任何本機檔案（`pbi_query/dax_query.txt`、`query_result.csv` 這類本機快取檔可以整個拿掉，除非你想保留「結果落地到使用者專案資料夾」這個體驗，那就是 Skill 自己用 Write 工具把 `run_dax_query` 回傳的內容寫成檔案）。
+跟 legacy 流程相比，**Skill 完全不需要碰觸 PBI_MASK_KEY**（那個概念在 MCP 流程裡整個消失），也不需要寫任何本機檔案（`pbi_query/dax_query.txt`、`query_result.csv` 這類本機快取檔可以整個拿掉，除非你想保留「結果落地到使用者專案資料夾」這個體驗，那就是 Skill 自己用 Write 工具把查詢結果寫成檔案）。跟 legacy 流程一樣，**Azure AD access token 由 Skill 自己拿去直接呼叫 Power BI**——這點兩邊其實相同，MCP 版只是把「怎麼拿到這個 token」從 PBI_MASK_KEY 換成 OAuth。
 
 ---
 

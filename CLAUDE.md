@@ -34,7 +34,8 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 - `datetime.now(timezone.utc)`：JWT 時間戳**必須**用這個，`utcnow()` 在 UTC+8 環境會讓 exp 提前 7 小時失效。
 - `client_secret` 以 AES-256-GCM 加密存 DB，key 衍生自 `SERVER_JWT_SECRET`。
 - PBI_MASK_KEY 明文只在產生時回傳一次，DB 只存 SHA-256 hash；OAuth refresh token 比照辦理，只存 hash。
-- MCP tool（`run_dax_query`）在 server 端完成 Azure AD 換 token + 呼叫 Power BI，access token 不會回傳給 MCP client，Skill 端完全不碰任何 Azure AD 憑證。
+- MCP tool（`get_powerbi_token`）只負責在 server 端跟 Azure AD 換 token，**查詢本身由呼叫端拿 token 直接打 Power BI executeQueries**，server 不代理查詢——這是刻意設計，早期版本讓 server 代跑查詢，同步阻塞的網路呼叫在並發時會卡住整個 event loop（MCP tool 沒有 FastAPI 那種自動 thread pool offload）。`get_powerbi_token` 內部用 `anyio.to_thread.run_sync` 包住 MSAL 呼叫，避免同樣問題。
+- `acquire_powerbi_token()`（`credential.py`）每次呼叫都重建 `ConfidentialClientApplication`，MSAL 內建的 token cache 因此沒作用；已知但暫緩優化，見函式內 TODO 註記。
 - OAuth client 一律走 Dynamic Client Registration + PKCE（public client，不核發 client_secret）。
 
 ## 分支策略
@@ -80,10 +81,10 @@ app/
   database.py      SQLAlchemy 設定
   routers/
     auth.py        /auth（使用者）
-    credential.py  /api（Skill legacy），也提供 acquire_powerbi_token/execute_dax_query 給 MCP 用
+    credential.py  /api（Skill legacy），也提供 acquire_powerbi_token 給 MCP 用
     admin.py       /api/admin（管理員）
     oauth.py       /oauth、/.well-known（OAuth 2.1 authorization server）
-    mcp.py         /mcp（MCP server + tools：list_models/get_model_detail/run_dax_query）
+    mcp.py         /mcp（MCP server + tools：list_models/get_model_detail/get_powerbi_token）
 admin-frontend/    Vue 3 SPA（Element Plus + Pinia）
 scripts/
   chunk_model.py   離線工具：將原始 PBI JSON 拆分成 relationships + tables

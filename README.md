@@ -139,8 +139,10 @@ Access token 是 1 小時效期的 JWT；refresh token 90 天效期、每次使�
 | Tool | 參數 | 說明 |
 |------|------|------|
 | `list_models` | 無 | 列出使用者可存取的模型（輕量版：id、名稱、說明、表數量） |
-| `get_model_detail` | `pbi_config_id` | 取得完整 relationships + tables 結構 |
-| `run_dax_query` | `pbi_config_id`, `dax` | 在 server 端完成 Azure AD 換 token + 呼叫 Power BI executeQueries，直接回傳查詢結果列 |
+| `get_model_detail` | `pbi_config_id` | 取得完整 relationships + tables 結構，含 `workspace_id`/`dataset_id` |
+| `get_powerbi_token` | `pbi_config_id` | 核發該設定的 Power BI access token（`access_token`/`token_type`/`expires_in`），**查詢由呼叫端自己直接打 Power BI executeQueries API 執行**，server 不代理查詢本身 |
+
+`get_powerbi_token` 內部同步呼叫 Azure AD（MSAL），用 `anyio.to_thread.run_sync` 丟到背景執行緒執行，避免併發請求時卡住 event loop（早期版本 `run_dax_query` 直接在 server 端執行查詢＋同步阻塞呼叫，並發量大時會拖垮整個服務，已改為現在這個設計）。
 
 ### 使用者 API（`/auth/*`）
 
@@ -245,7 +247,7 @@ docker image prune -f
 │   ├── security.py       密碼 hash、JWT 簽發、AES 加解密、PKCE 驗證、MCP token 簽發
 │   └── routers/
 │       ├── auth.py       /auth 路由（使用者）
-│       ├── credential.py /api 路由（Skill legacy，也提供 acquire_powerbi_token/execute_dax_query 給 MCP 用）
+│       ├── credential.py /api 路由（Skill legacy，也提供 acquire_powerbi_token 給 MCP 用）
 │       ├── admin.py      /api/admin 路由（管理員）
 │       ├── oauth.py      /oauth、/.well-known 路由（OAuth 2.1 authorization server）
 │       └── mcp.py        /mcp 路由（MCP server + tools）

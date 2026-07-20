@@ -1,5 +1,6 @@
 import os
 
+import anyio
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings
@@ -8,7 +9,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 from app.database import SessionLocal
 from app.models import ModelChunk, PbiConfig, User, UserPbiConfig
-from app.routers.credential import execute_dax_query
+from app.routers.credential import acquire_powerbi_token
 from app.security import verify_mcp_access_token
 
 
@@ -68,7 +69,7 @@ def get_mcp_server() -> FastMCP:
     issuer = _issuer()
     server = FastMCP(
         name="pbi-credential-mcp",
-        instructions="查詢使用者被授權存取的 Power BI 語意模型，並執行 DAX 查詢。",
+        instructions="查詢使用者被授權存取的 Power BI 語意模型結構，並取得執行 DAX 查詢所需的 access token（實際查詢由呼叫端直接對 Power BI REST API 執行）。",
         token_verifier=_JwtTokenVerifier(),
         auth=AuthSettings(
             issuer_url=issuer,
@@ -125,19 +126,34 @@ def get_mcp_server() -> FastMCP:
                 "pbi_config_id": config.id,
                 "pbi_config_name": config.name,
                 "model_version": latest.model_version,
+                "workspace_id": config.workspace_id,
+                "dataset_id": config.dataset_id,
                 "relationships": latest.relationships,
                 "tables": latest.tables,
             }
 
-    @server.tool()
-    async def run_dax_query(pbi_config_id: str, dax: str) -> list[dict]:
-        """對指定 PBI 設定執行 DAX 查詢（須為完整 EVALUATE 查詢語法），回傳查詢結果列。"""
+    def _get_powerbi_token_sync(pbi_config_id: str) -> dict:
         with SessionLocal() as db:
             user = _current_user(db)
-            config = _check_access(user, pbi_config_id, db)
+            _check_access(user, pbi_config_id, db)
             if not user.tenant_id or not user.client_id or not user.client_secret_enc:
                 raise ToolError("Azure AD 憑證尚未設定，請聯絡管理員")
-            return execute_dax_query(user, config, dax)
+            result = acquire_powerbi_token(user)
+        return {
+            "access_token": result["access_token"],
+            "token_type": "Bearer",
+            "expires_in": result.get("expires_in", 3600),
+        }
+
+    @server.tool()
+    async def get_powerbi_token(pbi_config_id: str) -> dict:
+        """取得指定 PBI 設定的 Power BI access token（Azure AD 核發），用來直接呼叫 Power BI
+        executeQueries API 執行 DAX 查詢。workspace_id/dataset_id 請從 get_model_detail 取得，
+        這裡不重複回傳。Token 效期見 expires_in（秒）：在效期內請重複使用同一個 token，
+        不要每次查詢都呼叫這個 tool；但也不要把 token 寫進本機檔案跨對話持久化。"""
+        # acquire_powerbi_token 內部是同步阻塞的 Azure AD 網路呼叫（msal），這裡丟到背景執行緒，
+        # 避免卡住整個 server 的 event loop（並發多個查詢時會互相卡住，見 commit history）。
+        return await anyio.to_thread.run_sync(_get_powerbi_token_sync, pbi_config_id)
 
     _mcp_server = server
     return server
