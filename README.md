@@ -230,6 +230,8 @@ docker compose logs -f
 
 服務前面掛了 [Caddy](https://caddyserver.com/) 做 TLS termination，自動跟 Let's Encrypt 要憑證並自動續約（設定見 [Caddyfile](Caddyfile)）。對外只開 80/443，`app` 容器的 8000 port 不再直接對外暴露，一律經過 Caddy 反向代理。第一次啟動時 Caddy 需要 80/443 對外可連才能完成 ACME 驗證，記得 VM 防火牆/安全群組要開這兩個 port。
 
+> ⚠️ **`docker compose up` 不能在沒有 `.env` 的情況下直接跑**（實測過，`git clone` 完立刻 `docker compose up --build -d` 會直接失敗：`env file .env not found`）。`.env` 一定要先建立好，且 `SITE_DOMAIN` 不能留空——留空的話 `app` 容器會正常啟動，但 `caddy` 容器會一直重啟（`unrecognized global option: reverse_proxy`，因為網域展開成空字串讓 Caddyfile 解析失敗）。
+
 更新部署：
 ```bash
 git pull
