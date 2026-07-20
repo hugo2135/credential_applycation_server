@@ -89,7 +89,11 @@ async def ip_whitelist(request: Request, call_next):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    # OAuth/MCP 端點（DCR、authorize、token、metadata）設計上就是要給任意第三方 OAuth
+    # client（例如 claude.ai 的瀏覽器端 JS）跨網域呼叫，不能只鎖 admin-frontend 這個
+    # 已知來源；這幾支端點本身用 PKCE + 使用者登入 + 同意畫面把關，CORS 在這裡本來就
+    # 不是主要防線，所以乾脆全域放開。
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
