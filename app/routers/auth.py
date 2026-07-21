@@ -1,14 +1,16 @@
 import os
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Security, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import User
+from app.models import PersonalAccessToken, User
 from app.security import (
     hash_password, authenticate_user,
     generate_mask_key, hash_mask_key,
+    generate_personal_access_token, hash_opaque_token,
     issue_user_jwt, verify_user_jwt,
 )
 
@@ -58,6 +60,10 @@ class UserMeResponse(BaseModel):
 class MaskKeyResponse(BaseModel):
     mask_key: str
     note: str
+
+
+class McpTokenCreateRequest(BaseModel):
+    name: Optional[str] = None
 
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
@@ -110,3 +116,59 @@ def issue_mask_key(payload: dict = Depends(_require_user), db: Session = Depends
         mask_key=key,
         note="請立即複製並妥善保存，此金鑰僅顯示一次",
     )
+
+
+# ── MCP Personal Access Token（給不支援完整 OAuth 的 MCP client 用） ──────────
+
+@router.post("/mcp-tokens", status_code=status.HTTP_201_CREATED)
+def create_mcp_token(
+    body: McpTokenCreateRequest,
+    payload: dict = Depends(_require_user),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.id == payload["sub"]).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="使用者不存在")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="帳號尚未開通，請聯絡管理員")
+    token = generate_personal_access_token()
+    pat = PersonalAccessToken(user_id=user.id, name=body.name, token_hash=hash_opaque_token(token))
+    db.add(pat)
+    db.commit()
+    db.refresh(pat)
+    return {
+        "id": pat.id,
+        "token": token,
+        "name": pat.name,
+        "note": "請立即複製並妥善保存，此 token 僅顯示一次，用於不支援 OAuth 連線的 MCP client",
+    }
+
+
+@router.get("/mcp-tokens")
+def list_mcp_tokens(payload: dict = Depends(_require_user), db: Session = Depends(get_db)):
+    tokens = db.query(PersonalAccessToken).filter(PersonalAccessToken.user_id == payload["sub"]).all()
+    return [
+        {
+            "id": t.id,
+            "name": t.name,
+            "created_at": t.created_at,
+            "last_used_at": t.last_used_at,
+        }
+        for t in tokens
+    ]
+
+
+@router.delete("/mcp-tokens/{token_id}", status_code=204)
+def delete_mcp_token(
+    token_id: str,
+    payload: dict = Depends(_require_user),
+    db: Session = Depends(get_db),
+):
+    token = db.query(PersonalAccessToken).filter(
+        PersonalAccessToken.id == token_id,
+        PersonalAccessToken.user_id == payload["sub"],
+    ).first()
+    if not token:
+        raise HTTPException(status_code=404, detail="找不到 token")
+    db.delete(token)
+    db.commit()

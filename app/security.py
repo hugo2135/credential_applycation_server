@@ -60,6 +60,10 @@ def generate_mask_key() -> str:
     return secrets.token_hex(32)
 
 
+def generate_personal_access_token() -> str:
+    return "pat_" + secrets.token_hex(32)
+
+
 def issue_credential_jwt(payload: dict, expires_at: datetime | None = None) -> str:
     expire = expires_at or datetime.now(timezone.utc) + timedelta(days=30)
     data = {

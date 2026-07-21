@@ -33,6 +33,16 @@
 3. 使用者在該頁面用**申請程式的帳密**（跟登入 `/dashboard` 一樣）登入，並同意授權
 4. Claude 保存 access token（1 小時效期）與 refresh token（90 天效期，每次刷新會輪換），之後每次對話自動使用，使用者不需要再做任何事
 
+### 不支援完整 OAuth 流程的 MCP client（例如 Antigravity）
+
+有些 MCP client 不會自動走上面的 OAuth 註冊/授權流程，而是要求使用者在它自己的 MCP 設定裡手動貼上一組固定的 `Authorization: Bearer <token>`。這種情況請使用者：
+
+1. 登入申請程式的 `/dashboard`，點選「前往管理 MCP Token」進到 `/mcp-tokens` 頁面
+2. 點「新增 Token」產生一組 Personal Access Token（`pat_` 開頭，只顯示一次，請立即複製）
+3. 依照該 MCP client 自己的說明，把這組 token 貼到它的 MCP server 設定裡（通常是一個 Authorization / Bearer token 欄位），server 網址一樣填 `https://<SITE_DOMAIN>/mcp`
+
+這組 token 跟 legacy 流程的 `PBI_MASK_KEY` 是不同機制、互不相通：`PBI_MASK_KEY` 是給 REST API（`/api/models`、`/api/token`）用的，這組 token 只認 MCP 端點。Token 沒有到期時間，直到使用者自己或管理員在 `/admin/users` 該使用者的「設定」彈窗裡撤銷為止。此路徑能不能讓特定 client（如 Antigravity）真的連上，仍需在該 client 實際設定完成後測試才能確認——我們這邊只保證 server 端支援用這組 token 通過 MCP 的身份驗證。
+
 ---
 
 ## MCP Tools

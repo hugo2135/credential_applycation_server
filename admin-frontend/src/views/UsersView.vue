@@ -1,6 +1,24 @@
 <template>
   <el-card>
-    <el-table :data="users" v-loading="loading" border>
+    <!-- 批次操作工具列，選取後才出現 -->
+    <div v-if="selected.length" style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px">
+      <span style="font-size: 13px; color: #666">已選擇 {{ selected.length }} 位使用者</span>
+      <el-button size="small" type="success" @click="batchActivate(true)">批次開通</el-button>
+      <el-button size="small" type="warning" @click="batchActivate(false)">批次停用</el-button>
+      <el-button size="small" @click="openBatchAssign">批次指派 PBI 設定</el-button>
+      <el-popconfirm
+        title="確定刪除這些使用者？此操作無法復原。"
+        confirm-button-type="danger"
+        @confirm="batchDelete"
+      >
+        <template #reference>
+          <el-button size="small" type="danger" plain>批次刪除</el-button>
+        </template>
+      </el-popconfirm>
+    </div>
+
+    <el-table :data="users" v-loading="loading" border @selection-change="selected = $event">
+      <el-table-column type="selection" width="42" />
       <el-table-column prop="email" label="Email" min-width="200" />
       <el-table-column label="狀態" width="100" align="center">
         <template #default="{ row }">
@@ -37,28 +55,9 @@
       <el-table-column label="到期時間" min-width="150">
         <template #default="{ row }">{{ fmtDate(row.expires_at) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="360" align="center">
+      <el-table-column label="操作" width="160" align="center">
         <template #default="{ row }">
-          <el-button
-            size="small"
-            :type="row.is_active ? 'warning' : 'success'"
-            @click="toggleActive(row)"
-          >
-            {{ row.is_active ? '停用' : '開通' }}
-          </el-button>
-          <el-button v-if="row.is_locked" size="small" type="warning" plain @click="unlockUser(row)">
-            🔒 解鎖
-          </el-button>
-          <el-button size="small" @click="openCredentials(row)">設定憑證</el-button>
-          <el-button size="small" @click="openAssign(row)">指派模型</el-button>
-          <el-popconfirm
-            title="重設後使用者需重新至 Dashboard 領取新的 Key，確定？"
-            @confirm="resetMaskKey(row)"
-          >
-            <template #reference>
-              <el-button size="small" type="info" plain>重設 Key</el-button>
-            </template>
-          </el-popconfirm>
+          <el-button size="small" @click="openSettings(row)">設定</el-button>
           <el-popconfirm
             title="確定刪除此使用者？此操作無法復原。"
             confirm-button-type="danger"
@@ -73,65 +72,146 @@
     </el-table>
   </el-card>
 
-  <!-- 設定 Azure AD 憑證 dialog -->
-  <el-dialog v-model="credDialog.visible" title="設定 Azure AD 憑證" width="440px">
-    <el-alert type="info" :closable="false" style="margin-bottom: 16px">
-      <template #title>每位使用者各自的 Azure AD Service Principal 憑證</template>
-    </el-alert>
-    <el-form :model="credDialog.form" label-width="120px">
-      <el-form-item label="Tenant ID" required>
-        <el-input v-model="credDialog.form.tenant_id" />
-      </el-form-item>
-      <el-form-item label="Client ID" required>
-        <el-input v-model="credDialog.form.client_id" />
-      </el-form-item>
-      <el-form-item label="Client Secret" required>
-        <el-input
-          v-model="credDialog.form.client_secret"
-          type="password"
-          show-password
-          placeholder="填入即更新，留空則取消"
-        />
-      </el-form-item>
-    </el-form>
+  <!-- 單一使用者設定：整合開通/停用、Azure AD 憑證、指派模型、重設 Key、解鎖、PAT 管理 -->
+  <el-dialog v-model="settingsDialog.visible" :title="`設定 - ${settingsDialog.user?.email ?? ''}`" width="560px">
+    <el-tabs v-model="settingsDialog.activeTab">
+      <el-tab-pane label="開通/停用" name="activate">
+        <el-form label-width="100px">
+          <el-form-item label="帳號狀態">
+            <el-switch
+              v-model="settingsDialog.activateForm.isActive"
+              active-text="開通"
+              inactive-text="停用"
+            />
+          </el-form-item>
+          <el-form-item label="到期時間">
+            <el-date-picker
+              v-model="settingsDialog.activateForm.expiresAt"
+              type="datetime"
+              placeholder="選填"
+              style="width: 100%"
+            />
+          </el-form-item>
+        </el-form>
+        <el-button type="primary" :loading="settingsDialog.saving" @click="saveActivate">儲存</el-button>
+      </el-tab-pane>
+
+      <el-tab-pane label="Azure AD 憑證" name="credentials">
+        <el-alert type="info" :closable="false" style="margin-bottom: 16px">
+          <template #title>每位使用者各自的 Azure AD Service Principal 憑證</template>
+        </el-alert>
+        <el-form label-width="120px">
+          <el-form-item label="Tenant ID" required>
+            <el-input v-model="settingsDialog.credForm.tenant_id" />
+          </el-form-item>
+          <el-form-item label="Client ID" required>
+            <el-input v-model="settingsDialog.credForm.client_id" />
+          </el-form-item>
+          <el-form-item label="Client Secret" required>
+            <el-input
+              v-model="settingsDialog.credForm.client_secret"
+              type="password"
+              show-password
+              placeholder="填入即更新，留空則取消"
+            />
+          </el-form-item>
+        </el-form>
+        <el-button type="primary" :loading="settingsDialog.saving" @click="saveCredentials">儲存</el-button>
+      </el-tab-pane>
+
+      <el-tab-pane label="指派模型" name="assign">
+        <el-form label-width="90px">
+          <el-form-item label="PBI 設定">
+            <el-select
+              v-model="settingsDialog.assignConfigIds"
+              multiple
+              collapse-tags
+              collapse-tags-tooltip
+              placeholder="選擇一或多個設定"
+              style="width: 100%"
+            >
+              <el-option v-for="c in configs" :key="c.id" :label="c.name" :value="c.id" />
+            </el-select>
+          </el-form-item>
+        </el-form>
+        <el-button type="primary" :loading="settingsDialog.saving" @click="saveAssign">儲存</el-button>
+      </el-tab-pane>
+
+      <el-tab-pane label="重設 Key" name="resetKey">
+        <p style="color: #666; margin-bottom: 16px; font-size: 14px">
+          重設後使用者需重新至 Dashboard 領取新的 PBI_MASK_KEY。
+        </p>
+        <el-popconfirm title="確定重設此使用者的 PBI_MASK_KEY？" @confirm="resetMaskKey">
+          <template #reference>
+            <el-button type="warning" plain>重設 Key</el-button>
+          </template>
+        </el-popconfirm>
+      </el-tab-pane>
+
+      <el-tab-pane v-if="settingsDialog.user?.is_locked" label="解鎖" name="unlock">
+        <p style="color: #666; margin-bottom: 16px; font-size: 14px">
+          帳號因密碼連續錯誤已被鎖定，解鎖後可重新登入。
+        </p>
+        <el-button type="warning" @click="unlockUser">🔒 解鎖</el-button>
+      </el-tab-pane>
+
+      <el-tab-pane label="PAT 管理" name="pat">
+        <p style="color: #666; margin-bottom: 16px; font-size: 14px">
+          使用者自助產生、給不支援 OAuth 的 MCP client 用的 token。管理員只能查看與撤銷，看不到明文。
+        </p>
+        <el-table :data="settingsDialog.patTokens" v-loading="settingsDialog.patLoading" size="small">
+          <el-table-column prop="name" label="名稱">
+            <template #default="{ row }">{{ row.name || '—' }}</template>
+          </el-table-column>
+          <el-table-column label="建立時間">
+            <template #default="{ row }">{{ fmtDate(row.created_at) }}</template>
+          </el-table-column>
+          <el-table-column label="最後使用">
+            <template #default="{ row }">{{ row.last_used_at ? fmtDate(row.last_used_at) : '尚未使用' }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="80">
+            <template #default="{ row }">
+              <el-popconfirm title="確定撤銷此 token？" @confirm="revokePat(row.id)">
+                <template #reference>
+                  <el-button type="danger" size="small" link>撤銷</el-button>
+                </template>
+              </el-popconfirm>
+            </template>
+          </el-table-column>
+          <template #empty>
+            <el-empty description="尚未建立任何 token" :image-size="60" />
+          </template>
+        </el-table>
+      </el-tab-pane>
+    </el-tabs>
+
     <template #footer>
-      <el-button @click="credDialog.visible = false">取消</el-button>
-      <el-button type="primary" :loading="credDialog.loading" @click="submitCredentials">儲存</el-button>
+      <el-button @click="settingsDialog.visible = false">關閉</el-button>
     </template>
   </el-dialog>
 
-  <!-- 指派語意模型 dialog -->
-  <el-dialog v-model="assignDialog.visible" title="指派語意模型" width="440px">
+  <!-- 批次指派 PBI 設定：只會新增，不會動到既有指派 -->
+  <el-dialog v-model="batchAssignDialog.visible" title="批次指派 PBI 設定" width="440px">
+    <el-alert type="info" :closable="false" style="margin-bottom: 16px">
+      <template #title>會新增指派給已選擇的 {{ selected.length }} 位使用者，不會移除他們既有的設定</template>
+    </el-alert>
     <el-form label-width="90px">
       <el-form-item label="PBI 設定">
         <el-select
-          v-model="assignDialog.configIds"
+          v-model="batchAssignDialog.configIds"
           multiple
           collapse-tags
           collapse-tags-tooltip
           placeholder="選擇一或多個設定"
           style="width: 100%"
         >
-          <el-option
-            v-for="c in configs"
-            :key="c.id"
-            :label="c.name"
-            :value="c.id"
-          />
+          <el-option v-for="c in configs" :key="c.id" :label="c.name" :value="c.id" />
         </el-select>
-      </el-form-item>
-      <el-form-item label="到期時間">
-        <el-date-picker
-          v-model="assignDialog.expiresAt"
-          type="datetime"
-          placeholder="選填"
-          style="width: 100%"
-        />
       </el-form-item>
     </el-form>
     <template #footer>
-      <el-button @click="assignDialog.visible = false">取消</el-button>
-      <el-button type="primary" :loading="assignDialog.loading" @click="submitAssign">確認</el-button>
+      <el-button @click="batchAssignDialog.visible = false">取消</el-button>
+      <el-button type="primary" :loading="batchAssignDialog.loading" @click="submitBatchAssign">確認</el-button>
     </template>
   </el-dialog>
 </template>
@@ -151,24 +231,34 @@ interface User {
   is_locked: boolean
 }
 interface Config { id: string; name: string }
+interface McpToken {
+  id: string
+  name: string | null
+  created_at: string
+  last_used_at: string | null
+}
 
 const users = ref<User[]>([])
 const configs = ref<Config[]>([])
 const loading = ref(false)
+const selected = ref<User[]>([])
 
-const credDialog = ref({
+const settingsDialog = ref({
   visible: false,
-  loading: false,
-  userId: '',
-  form: { tenant_id: '', client_id: '', client_secret: '' },
+  saving: false,
+  user: null as User | null,
+  activeTab: 'activate',
+  activateForm: { isActive: false, expiresAt: null as Date | null },
+  credForm: { tenant_id: '', client_id: '', client_secret: '' },
+  assignConfigIds: [] as string[],
+  patTokens: [] as McpToken[],
+  patLoading: false,
 })
 
-const assignDialog = ref({
+const batchAssignDialog = ref({
   visible: false,
   loading: false,
-  user: null as User | null,
   configIds: [] as string[],
-  expiresAt: null as Date | null,
 })
 
 async function load() {
@@ -190,91 +280,118 @@ function fmtDate(d: string | null) {
   return d ? new Date(d).toLocaleString() : '—'
 }
 
-async function toggleActive(row: User) {
+// ── 單一使用者設定彈窗 ──────────────────────────────────────────────
+
+function openSettings(row: User) {
+  settingsDialog.value = {
+    visible: true,
+    saving: false,
+    user: row,
+    activeTab: 'activate',
+    activateForm: { isActive: row.is_active, expiresAt: row.expires_at ? new Date(row.expires_at) : null },
+    credForm: { tenant_id: '', client_id: '', client_secret: '' },
+    assignConfigIds: [...(row.pbi_config_ids ?? [])],
+    patTokens: [],
+    patLoading: false,
+  }
+  loadPatTokens(row.id)
+}
+
+async function loadPatTokens(userId: string) {
+  settingsDialog.value.patLoading = true
   try {
-    await http.patch('/users/activate', { email: row.email, is_active: !row.is_active })
-    ElMessage.success(`${!row.is_active ? '開通' : '停用'} ${row.email} 成功`)
+    const { data } = await http.get(`/users/${userId}/mcp-tokens`)
+    settingsDialog.value.patTokens = data
+  } catch {
+    ElMessage.error('無法載入 token 清單')
+  } finally {
+    settingsDialog.value.patLoading = false
+  }
+}
+
+async function revokePat(tokenId: string) {
+  const userId = settingsDialog.value.user?.id
+  if (!userId) return
+  try {
+    await http.delete(`/users/${userId}/mcp-tokens/${tokenId}`)
+    ElMessage.success('已撤銷')
+    await loadPatTokens(userId)
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.detail ?? '撤銷失敗')
+  }
+}
+
+async function saveActivate() {
+  const d = settingsDialog.value
+  if (!d.user) return
+  d.saving = true
+  try {
+    await http.patch('/users/activate', {
+      email: d.user.email,
+      is_active: d.activateForm.isActive,
+      expires_at: d.activateForm.expiresAt?.toISOString() ?? null,
+    })
+    ElMessage.success('已儲存')
     await load()
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail ?? '操作失敗')
+  } finally {
+    d.saving = false
   }
 }
 
-function openCredentials(row: User) {
-  credDialog.value = {
-    visible: true,
-    loading: false,
-    userId: row.id,
-    form: { tenant_id: '', client_id: '', client_secret: '' },
-  }
-}
-
-async function submitCredentials() {
-  const d = credDialog.value
-  if (!d.form.tenant_id || !d.form.client_id || !d.form.client_secret) {
+async function saveCredentials() {
+  const d = settingsDialog.value
+  if (!d.user) return
+  if (!d.credForm.tenant_id || !d.credForm.client_id || !d.credForm.client_secret) {
     ElMessage.warning('三個欄位皆為必填')
     return
   }
-  d.loading = true
+  d.saving = true
   try {
-    await http.patch(`/users/${d.userId}/credentials`, d.form)
+    await http.patch(`/users/${d.user.id}/credentials`, d.credForm)
     ElMessage.success('Azure AD 憑證設定成功')
-    d.visible = false
     await load()
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail ?? '設定失敗')
   } finally {
-    d.loading = false
+    d.saving = false
   }
 }
 
-function openAssign(row: User) {
-  assignDialog.value = {
-    visible: true,
-    loading: false,
-    user: row,
-    configIds: [...(row.pbi_config_ids ?? [])],
-    expiresAt: row.expires_at ? new Date(row.expires_at) : null,
-  }
-}
-
-async function submitAssign() {
-  const d = assignDialog.value
+async function saveAssign() {
+  const d = settingsDialog.value
   if (!d.user) return
-  d.loading = true
+  d.saving = true
   try {
-    await Promise.all([
-      http.put(`/users/${d.user.id}/pbi-configs`, { pbi_config_ids: d.configIds }),
-      http.patch('/users/activate', {
-        email: d.user.email,
-        is_active: d.user.is_active,
-        expires_at: d.expiresAt?.toISOString() ?? null,
-      }),
-    ])
+    await http.put(`/users/${d.user.id}/pbi-configs`, { pbi_config_ids: d.assignConfigIds })
     ElMessage.success('指派成功')
-    d.visible = false
     await load()
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail ?? '操作失敗')
   } finally {
-    d.loading = false
+    d.saving = false
   }
 }
 
-async function resetMaskKey(row: User) {
+async function resetMaskKey() {
+  const user = settingsDialog.value.user
+  if (!user) return
   try {
-    await http.post(`/users/${row.id}/reset-mask-key`, {})
-    ElMessage.success(`${row.email} 的 PBI_MASK_KEY 已重設`)
-    await load()
+    await http.post(`/users/${user.id}/reset-mask-key`, {})
+    ElMessage.success(`${user.email} 的 PBI_MASK_KEY 已重設`)
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail ?? '重設失敗')
   }
 }
 
-async function unlockUser(row: User) {
+async function unlockUser() {
+  const user = settingsDialog.value.user
+  if (!user) return
   try {
-    await http.post(`/users/${row.id}/unlock`, {})
-    ElMessage.success(`${row.email} 已解鎖`)
+    await http.post(`/users/${user.id}/unlock`, {})
+    ElMessage.success(`${user.email} 已解鎖`)
+    settingsDialog.value.visible = false
     await load()
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail ?? '解鎖失敗')
@@ -288,6 +405,59 @@ async function deleteUser(row: User) {
     await load()
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail ?? '刪除失敗')
+  }
+}
+
+// ── 批次操作 ────────────────────────────────────────────────────────
+
+async function batchActivate(isActive: boolean) {
+  if (!selected.value.length) return
+  try {
+    await http.post('/users/batch-activate', {
+      user_ids: selected.value.map((u) => u.id),
+      is_active: isActive,
+    })
+    ElMessage.success(`已${isActive ? '開通' : '停用'} ${selected.value.length} 位使用者`)
+    await load()
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.detail ?? '批次操作失敗')
+  }
+}
+
+function openBatchAssign() {
+  batchAssignDialog.value = { visible: true, loading: false, configIds: [] }
+}
+
+async function submitBatchAssign() {
+  if (!batchAssignDialog.value.configIds.length) {
+    ElMessage.warning('請至少選擇一個 PBI 設定')
+    return
+  }
+  batchAssignDialog.value.loading = true
+  try {
+    await http.put('/users/batch-pbi-configs', {
+      user_ids: selected.value.map((u) => u.id),
+      pbi_config_ids: batchAssignDialog.value.configIds,
+    })
+    ElMessage.success('批次指派成功')
+    batchAssignDialog.value.visible = false
+    await load()
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.detail ?? '批次指派失敗')
+  } finally {
+    batchAssignDialog.value.loading = false
+  }
+}
+
+async function batchDelete() {
+  if (!selected.value.length) return
+  try {
+    await http.post('/users/batch-delete', { user_ids: selected.value.map((u) => u.id) })
+    ElMessage.success(`已刪除 ${selected.value.length} 位使用者`)
+    selected.value = []
+    await load()
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.detail ?? '批次刪除失敗')
   }
 }
 

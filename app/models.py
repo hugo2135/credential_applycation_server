@@ -92,3 +92,16 @@ class OAuthRefreshToken(Base):
     revoked = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     expires_at = Column(DateTime, nullable=False)
+
+
+class PersonalAccessToken(Base):
+    """給不支援完整 OAuth 流程的 MCP client（例如 Antigravity）用的固定 Bearer token。
+    使用者自助在 /mcp-tokens 頁面產生，明文只顯示一次，DB 只存 hash（比照 PBI_MASK_KEY）。"""
+    __tablename__ = "personal_access_tokens"
+
+    id = Column(String, primary_key=True, default=new_uuid)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    token_hash = Column(String, nullable=False, unique=True, index=True)
+    name = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_used_at = Column(DateTime, nullable=True)

@@ -13,7 +13,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import User, PbiConfig, ModelChunk, UserPbiConfig
+from app.models import PersonalAccessToken, User, PbiConfig, ModelChunk, UserPbiConfig
 from app.security import MAX_LOGIN_ATTEMPTS, encrypt_secret, issue_admin_jwt, verify_admin_jwt
 from scripts.chunk_model import parse_model
 
@@ -140,6 +140,105 @@ def delete_user(
     db.query(UserPbiConfig).filter(UserPbiConfig.user_id == user_id).delete()
     db.delete(user)
     db.commit()
+
+
+# ── MCP Personal Access Token（管理員只能查看/撤銷，不能代發——明文只在使用者
+# 自己產生當下顯示一次，管理員從來看不到明文） ────────────────────────────────
+
+@router.get("/users/{user_id}/mcp-tokens")
+def admin_list_mcp_tokens(
+    user_id: str,
+    _=Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    tokens = db.query(PersonalAccessToken).filter(PersonalAccessToken.user_id == user_id).all()
+    return [
+        {"id": t.id, "name": t.name, "created_at": t.created_at, "last_used_at": t.last_used_at}
+        for t in tokens
+    ]
+
+
+@router.delete("/users/{user_id}/mcp-tokens/{token_id}", status_code=204)
+def admin_delete_mcp_token(
+    user_id: str,
+    token_id: str,
+    _=Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    token = db.query(PersonalAccessToken).filter(
+        PersonalAccessToken.id == token_id,
+        PersonalAccessToken.user_id == user_id,
+    ).first()
+    if not token:
+        raise HTTPException(status_code=404, detail="找不到 token")
+    db.delete(token)
+    db.commit()
+
+
+# ── 批次操作 ───────────────────────────────────────────────────────────────
+
+class BatchActivateRequest(BaseModel):
+    user_ids: list[str]
+    is_active: bool
+
+
+class BatchPbiConfigsRequest(BaseModel):
+    user_ids: list[str]
+    pbi_config_ids: list[str]
+
+
+class BatchDeleteRequest(BaseModel):
+    user_ids: list[str]
+
+
+@router.post("/users/batch-activate")
+def batch_activate_users(
+    body: BatchActivateRequest,
+    _=Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    updated = db.query(User).filter(User.id.in_(body.user_ids)).update(
+        {"is_active": body.is_active}, synchronize_session=False
+    )
+    db.commit()
+    return {"message": f"已{'開通' if body.is_active else '停用'} {updated} 位使用者"}
+
+
+@router.put("/users/batch-pbi-configs")
+def batch_assign_pbi_configs(
+    body: BatchPbiConfigsRequest,
+    _=Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    """批次指派是「新增」，不會動到每位使用者既有的指派——批次替換風險太高，容易誤刪其他設定。"""
+    for cid in body.pbi_config_ids:
+        if not db.query(PbiConfig).filter(PbiConfig.id == cid).first():
+            raise HTTPException(status_code=404, detail=f"找不到 PBI 設定：{cid}")
+    added = 0
+    for uid in body.user_ids:
+        if not db.query(User).filter(User.id == uid).first():
+            continue
+        for cid in body.pbi_config_ids:
+            exists = db.query(UserPbiConfig).filter(
+                UserPbiConfig.user_id == uid, UserPbiConfig.pbi_config_id == cid,
+            ).first()
+            if not exists:
+                db.add(UserPbiConfig(user_id=uid, pbi_config_id=cid))
+                added += 1
+    db.commit()
+    return {"message": f"已新增 {added} 筆指派"}
+
+
+@router.post("/users/batch-delete", status_code=200)
+def batch_delete_users(
+    body: BatchDeleteRequest,
+    _=Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    db.query(UserPbiConfig).filter(UserPbiConfig.user_id.in_(body.user_ids)).delete(synchronize_session=False)
+    deleted = db.query(User).filter(User.id.in_(body.user_ids)).delete(synchronize_session=False)
+    db.commit()
+    return {"message": f"已刪除 {deleted} 位使用者"}
 
 
 @router.patch("/users/{user_id}/credentials")

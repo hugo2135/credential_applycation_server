@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 
 import anyio
 from mcp.server.auth.middleware.auth_context import get_access_token
@@ -9,9 +10,9 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
 from app.database import SessionLocal
-from app.models import ModelChunk, PbiConfig, User, UserPbiConfig
+from app.models import ModelChunk, PbiConfig, PersonalAccessToken, User, UserPbiConfig
 from app.routers.credential import acquire_powerbi_token
-from app.security import verify_mcp_access_token
+from app.security import hash_opaque_token, verify_mcp_access_token
 
 
 def _issuer() -> str:
@@ -38,15 +39,33 @@ class _JwtTokenVerifier(TokenVerifier):
     async def verify_token(self, token: str) -> AccessToken | None:
         try:
             payload = verify_mcp_access_token(token)
+            return AccessToken(
+                token=token,
+                client_id=payload.get("client_id", ""),
+                scopes=[],
+                subject=payload.get("sub"),
+                claims=payload,
+            )
         except Exception:
-            return None
-        return AccessToken(
-            token=token,
-            client_id=payload.get("client_id", ""),
-            scopes=[],
-            subject=payload.get("sub"),
-            claims=payload,
-        )
+            pass
+
+        # 不是 OAuth 發的 JWT，查是不是使用者自己在 /mcp-tokens 產生的 personal
+        # access token（給不支援完整 OAuth 流程的 MCP client，例如 Antigravity）。
+        with SessionLocal() as db:
+            pat = db.query(PersonalAccessToken).filter(
+                PersonalAccessToken.token_hash == hash_opaque_token(token)
+            ).first()
+            if not pat:
+                return None
+            pat.last_used_at = datetime.utcnow()
+            db.commit()
+            return AccessToken(
+                token=token,
+                client_id="personal-access-token",
+                scopes=[],
+                subject=pat.user_id,
+                claims={},
+            )
 
 
 def _current_user(db) -> User:

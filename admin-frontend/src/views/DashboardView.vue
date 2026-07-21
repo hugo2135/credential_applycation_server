@@ -71,11 +71,24 @@
         <el-empty description="PBI_MASK_KEY 已領取。如需重新領取，請聯絡管理員重設。" :image-size="80" />
       </template>
     </el-card>
+
+    <!-- 不支援 OAuth 連線的 MCP client，跟上面的 PBI_MASK_KEY 是不同機制 -->
+    <el-card style="margin-top: 20px">
+      <template #header>
+        <span style="font-size: 16px; font-weight: 600">MCP Personal Access Token</span>
+      </template>
+      <p style="color: #666; margin-bottom: 16px; font-size: 14px">
+        如果你使用的 MCP client（例如 Antigravity）不支援 OAuth 連線流程、需要手動貼上固定
+        Bearer token，請到專屬頁面產生這種 token（跟上方的 PBI_MASK_KEY 用途不同，不要混用）。
+      </p>
+      <el-button @click="router.push('/mcp-tokens')">前往管理 MCP Token</el-button>
+    </el-card>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import userHttp from '@/api/userHttp'
 
@@ -87,6 +100,7 @@ interface UserInfo {
   expires_at: string | null
 }
 
+const router = useRouter()
 const loading = ref(false)
 const issuing = ref(false)
 const info = ref<UserInfo | null>(null)

@@ -92,6 +92,7 @@ python -c "import secrets; print(secrets.token_hex(32))"
 | `/login` | 使用者 | 帳密登入，取得 8 小時 session |
 | `/register` | 使用者 | 申請帳號，等待管理員開通 |
 | `/dashboard` | 使用者 | 查看帳號狀態、領取 PBI_MASK_KEY |
+| `/mcp-tokens` | 使用者 | 產生／撤銷 MCP Personal Access Token（給不支援 OAuth 的 MCP client，例如 Antigravity） |
 | `/admin/login` | 管理員 | 輸入 ADMIN_SECRET，取得 1 小時 JWT |
 | `/admin/users` | 管理員 | 使用者管理 |
 | `/admin/pbi-configs` | 管理員 | PBI 連線設定管理 |
@@ -144,6 +145,8 @@ Access token 是 1 小時效期的 JWT；refresh token 90 天效期、每次使�
 
 `get_powerbi_token` 內部同步呼叫 Azure AD（MSAL），用 `anyio.to_thread.run_sync` 丟到背景執行緒執行，避免併發請求時卡住 event loop（早期版本 `run_dax_query` 直接在 server 端執行查詢＋同步阻塞呼叫，並發量大時會拖垮整個服務，已改為現在這個設計）。
 
+`/mcp` 的 Bearer token 接受兩種：OAuth 核發的 access token（見上方），或使用者自己在 `/mcp-tokens` 產生的 Personal Access Token（`pat_` 開頭，無到期時間，撤銷前一直有效）。後者是給不會自動走 OAuth 流程、需要手動貼上固定 token 的 MCP client 用，詳見 [docs/skill-integration.md](docs/skill-integration.md)。
+
 ### 使用者 API（`/auth/*`）
 
 | 方法 | 路徑 | 驗證 | 說明 |
@@ -152,6 +155,9 @@ Access token 是 1 小時效期的 JWT；refresh token 90 天效期、每次使�
 | POST | `/auth/login` | 無 | 帳密登入，回傳 8 小時 user session JWT |
 | GET | `/auth/me` | Bearer user JWT | 查看帳號狀態與 key 領取狀況 |
 | POST | `/auth/mask-key` | Bearer user JWT | 領取 PBI_MASK_KEY（僅顯示一次） |
+| POST | `/auth/mcp-tokens` | Bearer user JWT | 產生 MCP Personal Access Token（僅顯示一次） |
+| GET | `/auth/mcp-tokens` | Bearer user JWT | 列出自己的 token（不含明文） |
+| DELETE | `/auth/mcp-tokens/{id}` | Bearer user JWT | 撤銷自己的 token |
 
 ### 管理員 API（`/api/admin/*`）
 
@@ -165,6 +171,11 @@ Access token 是 1 小時效期的 JWT；refresh token 90 天效期、每次使�
 | POST | `/api/admin/users/{id}/reset-mask-key` | 重設 PBI_MASK_KEY（清除 hash，使用者重新領取） |
 | POST | `/api/admin/users/{id}/unlock` | 解除登入失敗鎖定（累積 5 次密碼錯誤會鎖） |
 | DELETE | `/api/admin/users/{id}` | 刪除使用者 |
+| GET | `/api/admin/users/{id}/mcp-tokens` | 查看該使用者的 MCP Personal Access Token 清單（不含明文） |
+| DELETE | `/api/admin/users/{id}/mcp-tokens/{token_id}` | 撤銷該使用者的指定 token |
+| POST | `/api/admin/users/batch-activate` | 批次開通／停用多位使用者 |
+| PUT | `/api/admin/users/batch-pbi-configs` | 批次指派 PBI 設定給多位使用者（只新增，不移除既有指派） |
+| POST | `/api/admin/users/batch-delete` | 批次刪除多位使用者 |
 | GET | `/api/admin/pbi-configs` | 列出所有 PBI 設定 |
 | POST | `/api/admin/pbi-configs` | 建立 PBI 設定 |
 | PATCH | `/api/admin/pbi-configs/{id}` | 更新 PBI 設定（含 `filters` 篩選規則） |
@@ -182,8 +193,8 @@ Access token 是 1 小時效期的 JWT；refresh token 90 天效期、每次使�
 2. 管理員在 /admin/users 開通帳號
 3. 管理員設定 Azure AD 憑證（Tenant ID / Client ID / Client Secret）
 4. 管理員指派一或多個 PBI 設定給使用者
-5. 使用者前往 /dashboard 領取 PBI_MASK_KEY（僅顯示一次）
-6. 將 PBI_MASK_KEY 填入 nl-to-dax Skill 環境設定
+5. 使用者前往 /dashboard 領取 PBI_MASK_KEY（僅顯示一次，legacy REST API 流程用）
+6. 若走 MCP：支援 OAuth 的 client（如 Claude）直接連線即可；不支援 OAuth 的 client（如 Antigravity）改由使用者到 /mcp-tokens 產生 Personal Access Token，貼進該 client 的 MCP 設定
 ```
 
 ## 語意模型上傳
@@ -211,6 +222,7 @@ python scripts/chunk_model.py path/to/model.json
 | `oauth_clients` | MCP connector 透過 DCR 註冊的 client（public client，不存 secret） |
 | `oauth_authorization_codes` | 短效期一次性 authorization code（PKCE challenge、5 分鐘過期、用過即作廢） |
 | `oauth_refresh_tokens` | 長效 refresh token（只存 hash，90 天效期，每次使用輪換） |
+| `personal_access_tokens` | MCP Personal Access Token（只存 hash，無到期時間，給不支援 OAuth 的 MCP client 用） |
 
 ## Docker 部署
 

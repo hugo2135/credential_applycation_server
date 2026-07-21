@@ -26,6 +26,7 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 | 管理員 SPA | POST /api/admin/login（ADMIN_SECRET） → 1 hr HS256 JWT，Bearer |
 | 使用者 SPA | POST /auth/login（帳密） → user session JWT，Bearer |
 | MCP connector | OAuth 2.1 + PKCE（`/oauth/authorize` 沿用使用者帳密登入）→ 1 hr access JWT + 90 天 refresh token（每次使用輪換，只存 hash） |
+| MCP connector（不支援 OAuth，如 Antigravity） | 使用者在 `/mcp-tokens` 自助產生 Personal Access Token（`pat_` 開頭），貼進該 client 設定當固定 Bearer，無到期時間，只能撤銷 |
 | Skill API（legacy） | Authorization: Bearer \<PBI_MASK_KEY\>（SHA-256 hash 存 DB） |
 
 ## 關鍵安全細節
@@ -33,7 +34,7 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 - `SERVER_JWT_SECRET`：**動態讀取**（`_get_secret()`），禁止 module-level 常數，避免 .env 載入時序問題。也是 MCP access token 的簽章金鑰。
 - `datetime.now(timezone.utc)`：JWT 時間戳**必須**用這個，`utcnow()` 在 UTC+8 環境會讓 exp 提前 7 小時失效。
 - `client_secret` 以 AES-256-GCM 加密存 DB，key 衍生自 `SERVER_JWT_SECRET`。
-- PBI_MASK_KEY 明文只在產生時回傳一次，DB 只存 SHA-256 hash；OAuth refresh token 比照辦理，只存 hash。
+- PBI_MASK_KEY 明文只在產生時回傳一次，DB 只存 SHA-256 hash；OAuth refresh token、MCP Personal Access Token（`personal_access_tokens` 表）比照辦理，只存 hash。`mcp.py` 的 `_JwtTokenVerifier` 驗證時先試 OAuth JWT，失敗再退回查 PAT hash——兩種 token 都能通過 `/mcp` 的身份驗證。
 - MCP tool（`get_powerbi_token`）只負責在 server 端跟 Azure AD 換 token，**查詢本身由呼叫端拿 token 直接打 Power BI executeQueries**，server 不代理查詢——這是刻意設計，早期版本讓 server 代跑查詢，同步阻塞的網路呼叫在並發時會卡住整個 event loop（MCP tool 沒有 FastAPI 那種自動 thread pool offload）。`get_powerbi_token` 內部用 `anyio.to_thread.run_sync` 包住 MSAL 呼叫，避免同樣問題。
 - `acquire_powerbi_token()`（`credential.py`）每次呼叫都重建 `ConfidentialClientApplication`，MSAL 內建的 token cache 因此沒作用；已知但暫緩優化，見函式內 TODO 註記。
 - OAuth client 一律走 Dynamic Client Registration + PKCE（public client，不核發 client_secret）。
@@ -79,10 +80,10 @@ npm run dev            # 同時啟動 uvicorn + Vite dev server
 app/
   main.py          FastAPI 入口（CORS、SPA static、MCP mount + lifespan）
   security.py      JWT、密碼、AES、PKCE 驗證、MCP token 簽發
-  models.py        SQLAlchemy ORM（含 OAuth 三張表）
+  models.py        SQLAlchemy ORM（含 OAuth 三張表 + personal_access_tokens）
   database.py      SQLAlchemy 設定
   routers/
-    auth.py        /auth（使用者）
+    auth.py        /auth（使用者，含 /auth/mcp-tokens 自助 PAT CRUD）
     credential.py  /api（Skill legacy），也提供 acquire_powerbi_token 給 MCP 用
     admin.py       /api/admin（管理員）
     oauth.py       /oauth、/.well-known（OAuth 2.1 authorization server）
@@ -101,7 +102,8 @@ docs/
 ```
 /login              使用者登入
 /register           使用者自助註冊
-/dashboard          使用者登入後首頁（查看憑證狀態、領取 key）
+/dashboard          使用者登入後首頁（查看憑證狀態、領取 key，連結到 /mcp-tokens）
+/mcp-tokens         MCP Personal Access Token 自助管理（跟 PBI_MASK_KEY UI 刻意分開，避免混淆兩種機制）
 
 /admin              重導向至 /admin/login
 /admin/login        管理員登入
