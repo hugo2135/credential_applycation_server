@@ -139,7 +139,7 @@ Access token 是 1 小時效期的 JWT；refresh token 90 天效期、每次使�
 | Tool | 參數 | 說明 |
 |------|------|------|
 | `list_models` | 無 | 列出使用者可存取的模型（輕量版：id、名稱、說明、表數量） |
-| `get_model_detail` | `pbi_config_id` | 取得完整 relationships + tables 結構，含 `workspace_id`/`dataset_id` |
+| `get_model_detail` | `pbi_config_id` | 取得完整 relationships + tables 結構，含 `workspace_id`/`dataset_id`/`filters`（管理員在 `/admin/pbi-configs` 維護的篩選規則） |
 | `get_powerbi_token` | `pbi_config_id` | 核發該設定的 Power BI access token（`access_token`/`token_type`/`expires_in`），**查詢由呼叫端自己直接打 Power BI executeQueries API 執行**，server 不代理查詢本身 |
 
 `get_powerbi_token` 內部同步呼叫 Azure AD（MSAL），用 `anyio.to_thread.run_sync` 丟到背景執行緒執行，避免併發請求時卡住 event loop（早期版本 `run_dax_query` 直接在 server 端執行查詢＋同步阻塞呼叫，並發量大時會拖垮整個服務，已改為現在這個設計）。
@@ -163,10 +163,11 @@ Access token 是 1 小時效期的 JWT；refresh token 90 天效期、每次使�
 | PATCH | `/api/admin/users/{id}/credentials` | 設定 Azure AD 憑證（Tenant / Client / Secret） |
 | PUT | `/api/admin/users/{id}/pbi-configs` | 指派語意模型（多個） |
 | POST | `/api/admin/users/{id}/reset-mask-key` | 重設 PBI_MASK_KEY（清除 hash，使用者重新領取） |
+| POST | `/api/admin/users/{id}/unlock` | 解除登入失敗鎖定（累積 5 次密碼錯誤會鎖） |
 | DELETE | `/api/admin/users/{id}` | 刪除使用者 |
 | GET | `/api/admin/pbi-configs` | 列出所有 PBI 設定 |
 | POST | `/api/admin/pbi-configs` | 建立 PBI 設定 |
-| PATCH | `/api/admin/pbi-configs/{id}` | 更新 PBI 設定 |
+| PATCH | `/api/admin/pbi-configs/{id}` | 更新 PBI 設定（含 `filters` 篩選規則） |
 | DELETE | `/api/admin/pbi-configs/{id}` | 刪除 PBI 設定（含關聯語意模型） |
 | POST | `/api/admin/model/upload` | 上傳語意模型（接受原始 PBI JSON） |
 | GET | `/api/admin/model/versions` | 列出所有版本 |
@@ -203,8 +204,8 @@ python scripts/chunk_model.py path/to/model.json
 
 | 資料表 | 說明 |
 |--------|------|
-| `users` | 帳號、密碼 hash、mask_key hash、Azure AD 憑證（AES-256-GCM 加密）、啟用狀態、到期時間 |
-| `pbi_config` | Power BI 連線設定（workspace_id、dataset_id） |
+| `users` | 帳號、密碼 hash、mask_key hash、Azure AD 憑證（AES-256-GCM 加密）、啟用狀態、到期時間、`failed_login_attempts`（累積 5 次密碼錯誤鎖定，僅能由管理員解鎖） |
+| `pbi_config` | Power BI 連線設定（workspace_id、dataset_id、`filters` 篩選規則陣列） |
 | `user_pbi_configs` | 使用者與 PBI 設定的多對多指派關係 |
 | `model_chunks` | 語意模型版本（版本號、名稱、pbi_config_id、relationships JSON、tables JSON） |
 | `oauth_clients` | MCP connector 透過 DCR 註冊的 client（public client，不存 secret） |

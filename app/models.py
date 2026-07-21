@@ -15,6 +15,7 @@ class PbiConfig(Base):
     name = Column(String, unique=True, nullable=False)
     workspace_id = Column(String, nullable=True)
     dataset_id = Column(String, nullable=True)
+    filters = Column(JSON, nullable=True)  # list[dict]，篩選設定檔（filterId/name/alwaysApply/...）
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
@@ -33,6 +34,7 @@ class User(Base):
     client_secret_enc = Column(String, nullable=True)        # AES-GCM 加密後儲存
     created_at = Column(DateTime, default=datetime.utcnow)
     expires_at = Column(DateTime, nullable=True)
+    failed_login_attempts = Column(Integer, default=0, nullable=False)
 
 
 class UserPbiConfig(Base):

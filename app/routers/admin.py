@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import User, PbiConfig, ModelChunk, UserPbiConfig
-from app.security import encrypt_secret, issue_admin_jwt, verify_admin_jwt
+from app.security import MAX_LOGIN_ATTEMPTS, encrypt_secret, issue_admin_jwt, verify_admin_jwt
 from scripts.chunk_model import parse_model
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -76,6 +76,7 @@ def list_users(_=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
             "has_credentials": bool(u.tenant_id and u.client_id and u.client_secret_enc),
             "expires_at": u.expires_at,
             "created_at": u.created_at,
+            "is_locked": u.failed_login_attempts >= MAX_LOGIN_ATTEMPTS,
         }
         for u in users
     ]
@@ -111,6 +112,20 @@ def reset_mask_key(
     user.mask_key_hash = None
     db.commit()
     return {"message": "PBI_MASK_KEY 已重設，使用者可重新至 Dashboard 領取"}
+
+
+@router.post("/users/{user_id}/unlock")
+def unlock_user(
+    user_id: str,
+    _=Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="找不到使用者")
+    user.failed_login_attempts = 0
+    db.commit()
+    return {"message": f"{user.email} 已解鎖"}
 
 
 @router.delete("/users/{user_id}", status_code=204)
@@ -165,6 +180,22 @@ def set_user_pbi_configs(
 
 # ── PBI 設定管理 ───────────────────────────────────────────────────────────
 
+class FilterRule(BaseModel):
+    description: str
+    expression: str
+    requiredTable: Optional[str] = None
+
+
+class FilterProfile(BaseModel):
+    filterId: str
+    name: str
+    description: Optional[str] = None
+    alwaysApply: bool = False
+    overrideDefaults: bool = False
+    contextKeywords: list[str] = []
+    filters: list[FilterRule] = []
+
+
 class PbiConfigCreate(BaseModel):
     name: str
     workspace_id: Optional[str] = None
@@ -174,6 +205,7 @@ class PbiConfigCreate(BaseModel):
 class PbiConfigUpdate(BaseModel):
     workspace_id: Optional[str] = None
     dataset_id: Optional[str] = None
+    filters: Optional[list[FilterProfile]] = None
 
 
 @router.get("/pbi-configs")
@@ -185,6 +217,7 @@ def list_pbi_configs(_=Depends(_require_admin_jwt), db: Session = Depends(get_db
             "name": c.name,
             "workspace_id": c.workspace_id,
             "dataset_id": c.dataset_id,
+            "filters": c.filters or [],
             "updated_at": c.updated_at,
         }
         for c in configs
@@ -220,6 +253,8 @@ def update_pbi_config(
         config.workspace_id = body.workspace_id
     if body.dataset_id is not None:
         config.dataset_id = body.dataset_id
+    if body.filters is not None:
+        config.filters = [f.model_dump() for f in body.filters]
     config.updated_at = datetime.utcnow()
     db.commit()
     return {"message": "PBI 設定更新成功"}

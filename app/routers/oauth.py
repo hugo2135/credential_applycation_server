@@ -10,11 +10,11 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import OAuthAuthorizationCode, OAuthClient, OAuthRefreshToken, User
 from app.security import (
+    authenticate_user,
     generate_authorization_code,
     generate_refresh_token,
     hash_opaque_token,
     issue_mcp_access_token,
-    verify_password,
     verify_pkce,
 )
 
@@ -181,8 +181,18 @@ def authorize_submit(
     if action == "deny":
         return RedirectResponse(f"{redirect_uri}?error=access_denied&state={state}", status_code=302)
 
-    user = db.query(User).filter(User.email == email).first()
-    if not user or not verify_password(password, user.password_hash):
+    user, status_ = authenticate_user(db, email, password)
+    if status_ == "locked":
+        return HTMLResponse(
+            _render_authorize_page(
+                client=client, error="帳號已被鎖定，請聯絡管理員解鎖",
+                response_type=response_type, client_id=client_id, redirect_uri=redirect_uri,
+                code_challenge=code_challenge, code_challenge_method=code_challenge_method,
+                state=state, scope=scope,
+            ),
+            status_code=403,
+        )
+    if status_ != "ok" or not user:
         return HTMLResponse(
             _render_authorize_page(
                 client=client, error="帳號或密碼錯誤",

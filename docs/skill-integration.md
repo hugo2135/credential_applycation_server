@@ -58,7 +58,7 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
 
 ### `get_model_detail`
 
-取得指定 PBI 設定的完整語意模型結構，DAX 生成前查表格/欄位/量值用，**也是查詢這個模型所需的 `workspace_id`/`dataset_id` 的來源**。
+取得指定 PBI 設定的完整語意模型結構，DAX 生成前查表格/欄位/量值用，**也是查詢這個模型所需的 `workspace_id`/`dataset_id`、以及篩選規則 `filters` 的來源**。
 
 **輸入**：`pbi_config_id: str`
 
@@ -70,6 +70,19 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
   "model_version": 5,
   "workspace_id": "e6833b06-998f-45c2-a6c7-43a402d6e12e",
   "dataset_id": "2097b78b-b3df-40f9-9478-680e324acd50",
+  "filters": [
+    {
+      "filterId": "exclude-return-orders",
+      "name": "排除退貨單",
+      "description": "預設查詢排除退貨訂單",
+      "alwaysApply": true,
+      "overrideDefaults": false,
+      "contextKeywords": [],
+      "filters": [
+        { "description": "排除退貨單", "expression": "Orders[order_type] <> \"return_order\"", "requiredTable": null }
+      ]
+    }
+  ],
   "relationships": {
     "relationships": [
       {
@@ -89,7 +102,16 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
   ]
 }
 ```
-使用者沒有這個 `pbi_config_id` 的存取權時回 tool error（不會洩漏該設定是否存在）。
+使用者沒有這個 `pbi_config_id` 的存取權時回 tool error（不會洩漏該設定是否存在）。`filters` 由管理員在 `/admin/pbi-configs` 集中維護，沒設定時是空陣列 `[]`。
+
+**篩選規則的比對邏輯**（Skill 拿到 `filters` 陣列後，在生成 DAX 前依序執行）：
+
+1. **收集預設篩選**：把所有 `alwaysApply = true` 的設定檔的 `filters` 合併為「預設篩選集」。
+2. **比對情境設定檔**：掃描所有 `alwaysApply = false` 的設定檔，檢查其 `contextKeywords` 是否出現在使用者的需求文字中，符合的收集為「命中設定檔清單」。
+3. **決定最終篩選集**：
+   - 命中設定檔中若有 `overrideDefaults = true`，該設定檔的 `filters` 完全取代預設篩選集（命中多個時以最後命中者優先）。
+   - 否則把命中設定檔的 `filters` 追加到預設篩選集後面。
+4. 套用到 DAX 時要確認每條規則的 `requiredTable`（如有）——該資料表不在本次查詢範圍內就跳過這條規則。若最終篩選集為空，正常生成 DAX、不加篩選條件即可，不需要額外詢問使用者。
 
 ### `get_powerbi_token`
 
@@ -140,10 +162,13 @@ Content-Type: application/json
        │
        ├─ 只有一個模型 → 自動選定；多個 → 請使用者選
        ▼
-呼叫 get_model_detail(pbi_config_id)   ← 取得完整 relationships + tables + workspace_id/dataset_id
+呼叫 get_model_detail(pbi_config_id)   ← 取得完整 relationships + tables + workspace_id/dataset_id + filters
        │
        ▼
-Skill 依現有推理邏輯（辨識資料表 → 驗證關聯 → 抽欄位/量值 → 生成 DAX）產出 DAX 查詢
+依 filters 比對邏輯決定最終篩選集（見上方「篩選規則的比對邏輯」）
+       │
+       ▼
+Skill 依現有推理邏輯（辨識資料表 → 驗證關聯 → 抽欄位/量值 → 套用篩選集 → 生成 DAX）產出 DAX 查詢
        │
        ▼
 手上有沒有還沒過期的 token？

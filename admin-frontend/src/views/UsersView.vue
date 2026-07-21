@@ -2,11 +2,14 @@
   <el-card>
     <el-table :data="users" v-loading="loading" border>
       <el-table-column prop="email" label="Email" min-width="200" />
-      <el-table-column label="狀態" width="90" align="center">
+      <el-table-column label="狀態" width="100" align="center">
         <template #default="{ row }">
           <el-tag :type="row.is_active ? 'success' : 'danger'">
             {{ row.is_active ? '已開通' : '未開通' }}
           </el-tag>
+          <div v-if="row.is_locked" style="margin-top: 4px">
+            <el-tag type="warning" size="small">🔒 已鎖定</el-tag>
+          </div>
         </template>
       </el-table-column>
       <el-table-column label="Azure AD 憑證" width="110" align="center">
@@ -42,6 +45,9 @@
             @click="toggleActive(row)"
           >
             {{ row.is_active ? '停用' : '開通' }}
+          </el-button>
+          <el-button v-if="row.is_locked" size="small" type="warning" plain @click="unlockUser(row)">
+            🔒 解鎖
           </el-button>
           <el-button size="small" @click="openCredentials(row)">設定憑證</el-button>
           <el-button size="small" @click="openAssign(row)">指派模型</el-button>
@@ -142,6 +148,7 @@ interface User {
   has_credentials: boolean
   pbi_config_ids: string[]
   expires_at: string | null
+  is_locked: boolean
 }
 interface Config { id: string; name: string }
 
@@ -261,6 +268,16 @@ async function resetMaskKey(row: User) {
     await load()
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail ?? '重設失敗')
+  }
+}
+
+async function unlockUser(row: User) {
+  try {
+    await http.post(`/users/${row.id}/unlock`, {})
+    ElMessage.success(`${row.email} 已解鎖`)
+    await load()
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.detail ?? '解鎖失敗')
   }
 }
 

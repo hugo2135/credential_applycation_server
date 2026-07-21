@@ -14,9 +14,16 @@
       <el-table-column label="Dataset ID" min-width="200">
         <template #default="{ row }">{{ row.dataset_id || '—' }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="160" align="center">
+      <el-table-column label="篩選規則" width="100" align="center">
+        <template #default="{ row }">
+          <el-tag v-if="row.filters?.length" size="small">{{ row.filters.length }} 筆</el-tag>
+          <span v-else style="color: #c0c4cc; font-size: 13px">未設定</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="240" align="center">
         <template #default="{ row }">
           <el-button size="small" @click="openEdit(row)">編輯</el-button>
+          <el-button size="small" @click="openFilters(row)">篩選規則</el-button>
           <el-popconfirm
             title="刪除後相關語意模型也會一併刪除，確定？"
             confirm-button-type="danger"
@@ -68,6 +75,42 @@
       <el-button type="primary" :loading="editDialog.loading" @click="submitEdit">儲存</el-button>
     </template>
   </el-dialog>
+
+  <!-- 篩選規則 Dialog -->
+  <el-dialog v-model="filterDialog.visible" title="篩選規則" width="640px">
+    <el-alert type="info" :closable="false" style="margin-bottom: 12px">
+      <template #title>
+        JSON 陣列，每筆一個篩選設定檔（filterId/name/alwaysApply/overrideDefaults/contextKeywords/filters）。
+        Skill 透過 get_model_detail 取得，格式說明見 docs/skill-integration.md。
+      </template>
+    </el-alert>
+    <el-input
+      v-model="filterDialog.text"
+      type="textarea"
+      :rows="16"
+      style="font-family: monospace; font-size: 12px"
+      placeholder='[
+  {
+    "filterId": "exclude-return-orders",
+    "name": "排除退貨單",
+    "description": "預設查詢排除退貨訂單",
+    "alwaysApply": true,
+    "overrideDefaults": false,
+    "contextKeywords": [],
+    "filters": [
+      { "description": "排除退貨單", "expression": "Orders[order_type] <> \"return_order\"" }
+    ]
+  }
+]'
+    />
+    <div v-if="filterDialog.error" style="color: #f56c6c; font-size: 13px; margin-top: 8px">
+      {{ filterDialog.error }}
+    </div>
+    <template #footer>
+      <el-button @click="filterDialog.visible = false">取消</el-button>
+      <el-button type="primary" :loading="filterDialog.loading" @click="submitFilters">儲存</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup lang="ts">
@@ -75,11 +118,21 @@ import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import http from '@/api/http'
 
+interface FilterProfile {
+  filterId: string
+  name: string
+  description?: string | null
+  alwaysApply: boolean
+  overrideDefaults: boolean
+  contextKeywords: string[]
+  filters: { description: string; expression: string; requiredTable?: string | null }[]
+}
 interface Config {
   id: string
   name: string
   workspace_id: string | null
   dataset_id: string | null
+  filters: FilterProfile[]
 }
 
 const configs = ref<Config[]>([])
@@ -97,6 +150,14 @@ const editDialog = ref({
   configId: '',
   name: '',
   form: { workspace_id: '', dataset_id: '' },
+})
+
+const filterDialog = ref({
+  visible: false,
+  loading: false,
+  configId: '',
+  text: '',
+  error: '',
 })
 
 async function load() {
@@ -127,6 +188,49 @@ function openEdit(row: Config) {
       workspace_id: row.workspace_id ?? '',
       dataset_id: row.dataset_id ?? '',
     },
+  }
+}
+
+function openFilters(row: Config) {
+  filterDialog.value = {
+    visible: true,
+    loading: false,
+    configId: row.id,
+    text: row.filters?.length ? JSON.stringify(row.filters, null, 2) : '',
+    error: '',
+  }
+}
+
+async function submitFilters() {
+  const d = filterDialog.value
+  d.error = ''
+  let filters: unknown = []
+  if (d.text.trim()) {
+    try {
+      filters = JSON.parse(d.text)
+    } catch {
+      d.error = 'JSON 格式錯誤，請確認內容'
+      return
+    }
+    if (!Array.isArray(filters)) {
+      d.error = '最外層必須是陣列（每筆一個篩選設定檔）'
+      return
+    }
+  }
+  d.loading = true
+  try {
+    await http.patch(`/pbi-configs/${d.configId}`, { filters })
+    ElMessage.success('篩選規則已儲存')
+    d.visible = false
+    await load()
+  } catch (e: any) {
+    d.error = e.response?.data?.detail
+      ? typeof e.response.data.detail === 'string'
+        ? e.response.data.detail
+        : JSON.stringify(e.response.data.detail)
+      : '儲存失敗'
+  } finally {
+    d.loading = false
   }
 }
 

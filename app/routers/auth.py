@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User
 from app.security import (
-    hash_password, verify_password,
+    hash_password, authenticate_user,
     generate_mask_key, hash_mask_key,
     issue_user_jwt, verify_user_jwt,
 )
@@ -74,8 +74,10 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
 
 @router.post("/login", response_model=TokenResponse)
 def login(body: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == body.email).first()
-    if not user or not verify_password(body.password, user.password_hash):
+    user, status_ = authenticate_user(db, body.email, body.password)
+    if status_ == "locked":
+        raise HTTPException(status_code=403, detail="帳號已被鎖定，請聯絡管理員解鎖")
+    if status_ != "ok" or not user:
         raise HTTPException(status_code=401, detail="帳號或密碼錯誤")
     return TokenResponse(access_token=issue_user_jwt(str(user.id), user.email))
 

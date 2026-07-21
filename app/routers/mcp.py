@@ -131,7 +131,7 @@ def get_mcp_server() -> FastMCP:
 
     @server.tool()
     async def get_model_detail(pbi_config_id: str) -> dict:
-        """取得指定 PBI 設定的完整語意模型結構（relationships + tables），DAX 生成前查表格/欄位/量值用。"""
+        """取得指定 PBI 設定的完整語意模型結構（relationships + tables + filters），DAX 生成前查表格/欄位/量值/篩選規則用。"""
         with SessionLocal() as db:
             user = _current_user(db)
             config = _check_access(user, pbi_config_id, db)
@@ -149,6 +149,7 @@ def get_mcp_server() -> FastMCP:
                 "model_version": latest.model_version,
                 "workspace_id": config.workspace_id,
                 "dataset_id": config.dataset_id,
+                "filters": config.filters or [],
                 "relationships": latest.relationships,
                 "tables": latest.tables,
             }
