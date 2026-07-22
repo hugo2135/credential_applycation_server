@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
+from app.access_log import record_access
 from app.database import SessionLocal
 from app.models import ModelChunk, PbiConfig, PersonalAccessToken, User, UserPbiConfig
 from app.routers.credential import acquire_powerbi_token
@@ -39,6 +40,14 @@ class _JwtTokenVerifier(TokenVerifier):
     async def verify_token(self, token: str) -> AccessToken | None:
         try:
             payload = verify_mcp_access_token(token)
+            with SessionLocal() as db:
+                record_access(
+                    db,
+                    user_id=payload.get("sub"),
+                    email=payload.get("email"),
+                    auth_method="oauth",
+                    path="/mcp",
+                )
             return AccessToken(
                 token=token,
                 client_id=payload.get("client_id", ""),
@@ -58,7 +67,14 @@ class _JwtTokenVerifier(TokenVerifier):
             if not pat:
                 return None
             pat.last_used_at = datetime.utcnow()
-            db.commit()
+            user = db.query(User).filter(User.id == pat.user_id).first()
+            record_access(  # 內部會 commit，一併把上面 last_used_at 的更新存下去
+                db,
+                user_id=pat.user_id,
+                email=user.email if user else None,
+                auth_method="pat",
+                path="/mcp",
+            )
             return AccessToken(
                 token=token,
                 client_id="personal-access-token",

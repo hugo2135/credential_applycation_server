@@ -1,14 +1,17 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
-from app.database import engine, Base
+from app.database import engine, Base, SessionLocal
+from app.models import AccessLog
 from app.routers import auth, credential, admin, oauth
 from app.routers import mcp as mcp_router
 
@@ -90,10 +93,25 @@ class _McpTrailingSlashFix:
         await self.app(scope, receive, send)
 
 
+ACCESS_LOG_RETENTION_DAYS = 90
+
+
+async def _cleanup_access_logs_loop():
+    # 存取歷史只留 90 天，沒有另外掛排程服務，開一個背景 task 每天跑一次清舊資料。
+    while True:
+        cutoff = datetime.utcnow() - timedelta(days=ACCESS_LOG_RETENTION_DAYS)
+        with SessionLocal() as db:
+            db.query(AccessLog).filter(AccessLog.created_at < cutoff).delete(synchronize_session=False)
+            db.commit()
+        await asyncio.sleep(24 * 60 * 60)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    cleanup_task = asyncio.create_task(_cleanup_access_logs_loop())
     async with _mcp_server.session_manager.run():
         yield
+    cleanup_task.cancel()
 
 
 app = FastAPI(title="PBI Credential 申請程式", version="0.1.0", lifespan=lifespan)

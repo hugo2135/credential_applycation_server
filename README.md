@@ -55,6 +55,7 @@ Token issuance calls Azure AD (MSAL) synchronously, so it runs in a worker threa
 - User lifecycle with admin approval, expiry dates, key/token reset, and **batch operations** (activate, assign, delete)
 - Per-user many-to-many semantic-model assignment; per-config **filter rules** distributed to clients
 - Semantic-model versioning: admins upload raw Power BI model JSON; the server parses relationships/tables and serves named versions
+- **Access history**: every authenticated hit to `/auth/*`, `/mcp`, or the legacy `/api/*` is logged (who, when, which auth method); 90-day retention with a CSV export at `/admin/access-logs`
 
 ## Testing
 

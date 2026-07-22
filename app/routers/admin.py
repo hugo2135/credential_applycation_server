@@ -1,3 +1,5 @@
+import csv
+import io
 import os
 import json
 import secrets as _secrets
@@ -13,7 +15,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import PersonalAccessToken, User, PbiConfig, ModelChunk, UserPbiConfig
+from app.models import AccessLog, PersonalAccessToken, User, PbiConfig, ModelChunk, UserPbiConfig
 from app.security import MAX_LOGIN_ATTEMPTS, encrypt_secret, issue_admin_jwt, verify_admin_jwt
 from scripts.chunk_model import parse_model
 
@@ -239,6 +241,80 @@ def batch_delete_users(
     deleted = db.query(User).filter(User.id.in_(body.user_ids)).delete(synchronize_session=False)
     db.commit()
     return {"message": f"已刪除 {deleted} 位使用者"}
+
+
+# ── 存取歷史（/dashboard、/mcp、/mcp-tokens、/api 等，只留 90 天） ────────────────
+
+def _filtered_access_logs(
+    db: Session,
+    email: Optional[str],
+    auth_method: Optional[str],
+    start: Optional[datetime],
+    end: Optional[datetime],
+):
+    q = db.query(AccessLog)
+    if email:
+        q = q.filter(AccessLog.email.ilike(f"%{email}%"))
+    if auth_method:
+        q = q.filter(AccessLog.auth_method == auth_method)
+    if start:
+        q = q.filter(AccessLog.created_at >= start)
+    if end:
+        q = q.filter(AccessLog.created_at <= end)
+    return q.order_by(AccessLog.created_at.desc())
+
+
+@router.get("/access-logs")
+def list_access_logs(
+    email: Optional[str] = Query(None, description="依 email 模糊搜尋"),
+    auth_method: Optional[str] = Query(None, description="user_session / oauth / pat / mask_key"),
+    start: Optional[datetime] = Query(None),
+    end: Optional[datetime] = Query(None),
+    limit: int = Query(200, le=1000),
+    _=Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    rows = _filtered_access_logs(db, email, auth_method, start, end).limit(limit).all()
+    return [
+        {
+            "id": r.id,
+            "user_id": r.user_id,
+            "email": r.email,
+            "path": r.path,
+            "method": r.method,
+            "auth_method": r.auth_method,
+            "ip_address": r.ip_address,
+            "created_at": r.created_at,
+        }
+        for r in rows
+    ]
+
+
+@router.get("/access-logs/export")
+def export_access_logs(
+    email: Optional[str] = Query(None),
+    auth_method: Optional[str] = Query(None),
+    start: Optional[datetime] = Query(None),
+    end: Optional[datetime] = Query(None),
+    _=Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    rows = _filtered_access_logs(db, email, auth_method, start, end).all()
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["created_at", "email", "auth_method", "method", "path", "ip_address"])
+    for r in rows:
+        writer.writerow([
+            r.created_at.isoformat(), r.email or "", r.auth_method, r.method or "", r.path, r.ip_address or "",
+        ])
+
+    filename = f"access-logs-{datetime.utcnow().strftime('%Y%m%d')}.csv"
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.patch("/users/{user_id}/credentials")

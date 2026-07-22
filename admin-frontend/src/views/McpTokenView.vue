@@ -3,12 +3,7 @@
     <el-page-header content="MCP Personal Access Token" @back="router.push('/dashboard')" style="margin-bottom: 20px" />
 
     <el-alert type="info" :closable="false" style="margin-bottom: 20px">
-      <template #title>
-        這裡產生的 token 跟 PBI_MASK_KEY 是不同東西：PBI_MASK_KEY 給支援 OAuth 連線的
-        MCP client（例如 Claude）使用；這裡的 token 給不支援 OAuth 流程、需要手動貼上
-        固定 Bearer token 的 MCP client（例如 Antigravity）使用，請依照該 client 的說明
-        將 token 貼到它的 MCP 設定裡。
-      </template>
+      <template #title>新增 Token 只顯示一次，請依各模型供應商的建立 MCP 說明貼上。</template>
     </el-alert>
 
     <!-- 新產生的 token（本次領取後顯示一次） -->
@@ -38,11 +33,11 @@
           <template #default="{ row }">{{ row.name || '—' }}</template>
         </el-table-column>
         <el-table-column label="建立時間">
-          <template #default="{ row }">{{ new Date(row.created_at).toLocaleString() }}</template>
+          <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
         </el-table-column>
         <el-table-column label="最後使用">
           <template #default="{ row }">
-            {{ row.last_used_at ? new Date(row.last_used_at).toLocaleString() : '尚未使用' }}
+            {{ row.last_used_at ? formatDate(row.last_used_at) : '尚未使用' }}
           </template>
         </el-table-column>
         <el-table-column label="操作" width="100">
@@ -79,6 +74,7 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import userHttp from '@/api/userHttp'
+import { formatDate } from '@/utils/date'
 
 interface McpToken {
   id: string

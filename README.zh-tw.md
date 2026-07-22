@@ -97,6 +97,7 @@ python -c "import secrets; print(secrets.token_hex(32))"
 | `/admin/users` | 管理員 | 使用者管理 |
 | `/admin/pbi-configs` | 管理員 | PBI 連線設定管理 |
 | `/admin/model` | 管理員 | 語意模型版本管理 |
+| `/admin/access-logs` | 管理員 | 存取歷史查詢／匯出（`/dashboard`、`/mcp`、`/mcp-tokens`、`/api` 等，保留 90 天） |
 
 ## API 端點
 
@@ -176,6 +177,8 @@ Access token 是 1 小時效期的 JWT；refresh token 90 天效期、每次使�
 | POST | `/api/admin/users/batch-activate` | 批次開通／停用多位使用者 |
 | PUT | `/api/admin/users/batch-pbi-configs` | 批次指派 PBI 設定給多位使用者（只新增，不移除既有指派） |
 | POST | `/api/admin/users/batch-delete` | 批次刪除多位使用者 |
+| GET | `/api/admin/access-logs` | 查詢存取歷史（可依 email/auth_method/時間區間篩選，只留 90 天） |
+| GET | `/api/admin/access-logs/export` | 匯出存取歷史為 CSV |
 | GET | `/api/admin/pbi-configs` | 列出所有 PBI 設定 |
 | POST | `/api/admin/pbi-configs` | 建立 PBI 設定 |
 | PATCH | `/api/admin/pbi-configs/{id}` | 更新 PBI 設定（含 `filters` 篩選規則） |
@@ -223,6 +226,7 @@ python scripts/chunk_model.py path/to/model.json
 | `oauth_authorization_codes` | 短效期一次性 authorization code（PKCE challenge、5 分鐘過期、用過即作廢） |
 | `oauth_refresh_tokens` | 長效 refresh token（只存 hash，90 天效期，每次使用輪換） |
 | `personal_access_tokens` | MCP Personal Access Token（只存 hash，無到期時間，給不支援 OAuth 的 MCP client 用） |
+| `access_logs` | 使用者存取歷史（誰、何時、用哪種方式、打了哪個路徑），只留 90 天，`main.py` 背景 task 每天清理 |
 
 ## Docker 部署
 
@@ -256,10 +260,11 @@ docker image prune -f
 
 ```
 ├── app/
-│   ├── main.py           FastAPI 入口（CORS、SPA 靜態服務、DB migration、IP 白名單、MCP mount + lifespan）
+│   ├── main.py           FastAPI 入口（CORS、SPA 靜態服務、DB migration、IP 白名單、MCP mount + lifespan、access_logs 每日清理）
 │   ├── database.py       SQLAlchemy 設定
-│   ├── models.py         ORM 資料模型（含 OAuth 相關表）
+│   ├── models.py         ORM 資料模型（含 OAuth 相關表、access_logs）
 │   ├── security.py       密碼 hash、JWT 簽發、AES 加解密、PKCE 驗證、MCP token 簽發
+│   ├── access_log.py     存取歷史寫入共用邏輯，供各路由的身份驗證點呼叫
 │   └── routers/
 │       ├── auth.py       /auth 路由（使用者）
 │       ├── credential.py /api 路由（Skill legacy，也提供 acquire_powerbi_token 給 MCP 用）

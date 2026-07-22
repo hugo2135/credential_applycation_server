@@ -1,10 +1,11 @@
 import os
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Security, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Security, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
+from app.access_log import client_ip, record_access
 from app.database import get_db
 from app.models import PersonalAccessToken, User
 from app.security import (
@@ -29,9 +30,21 @@ _bearer = HTTPBearer()
 
 
 def _require_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Security(_bearer),
+    db: Session = Depends(get_db),
 ) -> dict:
-    return verify_user_jwt(credentials.credentials)
+    payload = verify_user_jwt(credentials.credentials)
+    record_access(
+        db,
+        user_id=payload.get("sub"),
+        email=payload.get("email"),
+        auth_method="user_session",
+        path=request.url.path,
+        method=request.method,
+        ip_address=client_ip(request),
+    )
+    return payload
 
 
 class RegisterRequest(BaseModel):

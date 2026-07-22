@@ -105,3 +105,19 @@ class PersonalAccessToken(Base):
     name = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     last_used_at = Column(DateTime, nullable=True)
+
+
+class AccessLog(Base):
+    """使用者存取歷史，供管理員在 /admin/access-logs 查詢／匯出。只留 90 天（見 main.py
+    的背景清理 task），user_id 允許為 null、email 額外存一份純文字快照，這樣使用者
+    被刪除後歷史紀錄還能看出當初是誰存取的。"""
+    __tablename__ = "access_logs"
+
+    id = Column(String, primary_key=True, default=new_uuid)
+    user_id = Column(String, ForeignKey("users.id"), nullable=True, index=True)
+    email = Column(String, nullable=True, index=True)
+    path = Column(String, nullable=False)
+    method = Column(String, nullable=True)  # /mcp 這個驗證點拿不到 HTTP method，留空
+    auth_method = Column(String, nullable=False, index=True)  # user_session / oauth / pat / mask_key
+    ip_address = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)

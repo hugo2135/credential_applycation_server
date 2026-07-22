@@ -214,6 +214,7 @@ import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { UploadFile } from 'element-plus'
 import http from '@/api/http'
+import { formatDate } from '@/utils/date'
 
 interface PbiConfig {
   id: string
@@ -257,7 +258,7 @@ const editingName    = ref('')
 const descDialog     = ref({ visible: false, loading: false, id: '', text: '' })
 
 function fmtDate(d: string) {
-  return new Date(d).toLocaleString()
+  return formatDate(d)
 }
 
 function configName(id: string | null) {

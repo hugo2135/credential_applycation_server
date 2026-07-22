@@ -23,6 +23,10 @@
           <el-icon><Upload /></el-icon>
           <span>語意模型</span>
         </el-menu-item>
+        <el-menu-item index="/admin/access-logs">
+          <el-icon><Clock /></el-icon>
+          <span>存取歷史</span>
+        </el-menu-item>
       </el-menu>
 
       <div style="position: absolute; bottom: 16px; width: 8%; padding: 0 12px; box-sizing: border-box">
@@ -54,6 +58,7 @@ const titleMap: Record<string, string> = {
   '/admin/users': '使用者管理',
   '/admin/pbi-configs': 'PBI 設定管理',
   '/admin/model': '語意模型管理',
+  '/admin/access-logs': '存取歷史',
 }
 const pageTitle = computed(() => titleMap[route.path] ?? '')
 

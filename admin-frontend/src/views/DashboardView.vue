@@ -13,7 +13,7 @@
           </el-tag>
         </el-descriptions-item>
         <el-descriptions-item label="到期時間">
-          {{ info?.expires_at ? new Date(info.expires_at).toLocaleString() : '—' }}
+          {{ formatDate(info?.expires_at) }}
         </el-descriptions-item>
         <el-descriptions-item label="PBI_MASK_KEY">
           <el-tag :type="info?.has_mask_key ? 'info' : 'default'">
@@ -91,6 +91,7 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import userHttp from '@/api/userHttp'
+import { formatDate } from '@/utils/date'
 
 interface UserInfo {
   user_id: string

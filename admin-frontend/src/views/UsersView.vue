@@ -220,6 +220,7 @@
 import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import http from '@/api/http'
+import { formatDate, parseUtcDate } from '@/utils/date'
 
 interface User {
   id: string
@@ -277,7 +278,7 @@ function configName(id: string) {
 }
 
 function fmtDate(d: string | null) {
-  return d ? new Date(d).toLocaleString() : '—'
+  return formatDate(d)
 }
 
 // ── 單一使用者設定彈窗 ──────────────────────────────────────────────
@@ -288,7 +289,7 @@ function openSettings(row: User) {
     saving: false,
     user: row,
     activeTab: 'activate',
-    activateForm: { isActive: row.is_active, expiresAt: row.expires_at ? new Date(row.expires_at) : null },
+    activateForm: { isActive: row.is_active, expiresAt: parseUtcDate(row.expires_at) },
     credForm: { tenant_id: '', client_id: '', client_secret: '' },
     assignConfigIds: [...(row.pbi_config_ids ?? [])],
     patTokens: [],

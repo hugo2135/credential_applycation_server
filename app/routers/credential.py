@@ -1,9 +1,10 @@
 from datetime import datetime
 import msal
-from fastapi import APIRouter, Depends, HTTPException, Query, Security
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
+from app.access_log import client_ip, record_access
 from app.database import get_db
 from app.models import User, PbiConfig, ModelChunk, UserPbiConfig
 from app.security import hash_mask_key, decrypt_secret
@@ -15,6 +16,7 @@ _POWERBI_SCOPE = ["https://analysis.windows.net/powerbi/api/.default"]
 
 
 def _resolve_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Security(bearer),
     db: Session = Depends(get_db),
 ) -> User:
@@ -26,6 +28,15 @@ def _resolve_user(
         raise HTTPException(status_code=403, detail="帳號已停用")
     if user.expires_at and user.expires_at < datetime.utcnow():
         raise HTTPException(status_code=403, detail="憑證已過期，請聯絡管理員")
+    record_access(
+        db,
+        user_id=user.id,
+        email=user.email,
+        auth_method="mask_key",
+        path=request.url.path,
+        method=request.method,
+        ip_address=client_ip(request),
+    )
     return user
 
 

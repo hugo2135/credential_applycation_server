@@ -40,6 +40,8 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 - OAuth client 一律走 Dynamic Client Registration + PKCE（public client，不核發 client_secret）。
 - `/auth/login`、`/oauth/authorize` 的登入共用 `security.authenticate_user()`，累積 5 次密碼錯誤鎖定帳號（`User.failed_login_attempts`），只能由管理員在 `/admin/users` 解鎖，沒有自動過期解鎖。兩個入口共用同一組計數，其中一邊被鎖另一邊也會被鎖。
 - `PbiConfig.filters` 是管理員在 `/admin/pbi-configs` 維護的篩選規則（JSON 陣列），透過 `get_model_detail` 交給 skill 端，取代原本 skill 本機 `filters/*.json` 的設計，格式與比對邏輯見 `docs/skill-integration.md`。
+- 裸路徑 `/mcp`（沒有尾斜線）**不能**用 HTTP 307 轉址到 `/mcp/` 處理——部分 MCP client（例如 Gemini）跟隨轉址重新發送請求時不會保留 `Authorization` header，會導致認證失敗。`main.py` 的 `_McpTrailingSlashFix` 改成在 ASGI 層、Starlette Router 判斷路由之前，直接把路徑內部改寫成 `/mcp/`，同一個請求處理完，client 端完全不會看到任何轉址；這個 wrapper 必須包住整個 `app`（不能只包 `/mcp` 掛載的 sub-app），因為 Router 判斷要不要進到 Mount 這一步，發生在 sub-app 被呼叫之前。
+- 存取歷史（`access_logs` 表）在三個既有身份驗證點各自補一行寫入（`auth.py` 的 `_require_user`、`mcp.py` 的 `_JwtTokenVerifier`、`credential.py` 的 `_resolve_user`），共用 `app/access_log.py` 的 `record_access()`，只記錄驗證成功的請求。`/mcp` 這個點沒有 `Request` context 可用（`TokenVerifier.verify_token()` 介面只給 token 字串），所以 IP／HTTP method 這兩欄位在 MCP 的紀錄裡會是空的。只留 90 天，`main.py` 的 lifespan 開一個背景 task 每天清一次舊資料，沒有另外掛排程服務。
 
 ## 分支策略
 
@@ -78,9 +80,10 @@ npm run dev            # 同時啟動 uvicorn + Vite dev server
 
 ```
 app/
-  main.py          FastAPI 入口（CORS、SPA static、MCP mount + lifespan）
+  main.py          FastAPI 入口（CORS、SPA static、MCP mount + lifespan、access_logs 每日清理 task）
   security.py      JWT、密碼、AES、PKCE 驗證、MCP token 簽發
-  models.py        SQLAlchemy ORM（含 OAuth 三張表 + personal_access_tokens）
+  access_log.py    存取歷史寫入共用邏輯（record_access），三個身份驗證點都呼叫這裡
+  models.py        SQLAlchemy ORM（含 OAuth 三張表 + personal_access_tokens + access_logs）
   database.py      SQLAlchemy 設定
   routers/
     auth.py        /auth（使用者，含 /auth/mcp-tokens 自助 PAT CRUD）
@@ -110,6 +113,7 @@ docs/
 /admin/users        使用者管理（管理員）
 /admin/pbi-configs  PBI 設定管理（管理員）
 /admin/model        語意模型管理（管理員）
+/admin/access-logs  存取歷史查詢／匯出（管理員）
 ```
 
 管理員與使用者的 JWT 過期時，`admin-frontend/src/api/http.ts` 的 axios response 攔截器會在收到 401 時清除 token 並導回對應登入頁（管理員 → `/admin/login`）。**修改前端後必須執行 `npm run build --prefix admin-frontend` 重新產生 `dist/`**，否則 FastAPI 會繼續 serve 舊的靜態檔案，導致行為與原始碼不一致（例如導向錯誤的登入頁）。
