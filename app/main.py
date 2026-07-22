@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
 from app.database import engine, Base
 from app.routers import auth, credential, admin, oauth
@@ -70,6 +70,26 @@ with engine.connect() as _conn:
 _mcp_server = mcp_router.get_mcp_server()
 
 
+class _McpTrailingSlashFix:
+    """Starlette 的 Mount 只認得帶尾斜線的 "/mcp/"，裸路徑 "/mcp" 原本要靠 307
+    轉址到 "/mcp/" 才能命中。但部分 MCP client（例如 Gemini）跟隨轉址重新發送
+    請求時不會保留原本的 Authorization header，導致認證失敗。改成在 ASGI 層、
+    Starlette Router 決定路由之前，直接把路徑補上尾斜線再往下傳，同一個請求
+    內處理完，client 端完全不會看到任何轉址，也就不會有 header 掉的問題。
+    必須包住整個 app（而不是只包 /mcp 掛載的 sub-app），因為 Router 比對路徑
+    是否命中 Mount 這一步，發生在 sub-app 被呼叫之前。"""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"] == "/mcp":
+            scope = dict(scope)
+            scope["path"] = "/mcp/"
+            scope["raw_path"] = b"/mcp/"
+        await self.app(scope, receive, send)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     async with _mcp_server.session_manager.run():
@@ -113,14 +133,6 @@ app.include_router(admin.router)
 app.include_router(oauth.router)
 
 
-@app.api_route("/mcp", methods=["GET", "POST", "DELETE"], include_in_schema=False)
-async def _mcp_no_trailing_slash(request: Request):
-    # Starlette 的 Mount 只認得帶尾斜線的 "/mcp/"，裸路徑 "/mcp" 不會進到 mount，
-    # 會被後面的 SPA catch-all 攔走變成 404。這裡先攔一手，307 保留 method/body 轉去 "/mcp/"。
-    query = f"?{request.url.query}" if request.url.query else ""
-    return RedirectResponse(url=f"/mcp/{query}", status_code=307)
-
-
 app.mount("/mcp", _mcp_server.streamable_http_app())
 
 
@@ -142,3 +154,8 @@ if os.path.isdir(FRONTEND_DIST):
             os.path.join(FRONTEND_DIST, "index.html"),
             headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
         )
+
+
+# 一定要包在所有路由/掛載都註冊完之後：往下轉發給 FastAPI 的 router 前，先攔截
+# 裸路徑 "/mcp"，讓它補上尾斜線後才進入路由比對（見 _McpTrailingSlashFix 說明）。
+app = _McpTrailingSlashFix(app)
