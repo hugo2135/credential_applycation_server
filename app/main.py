@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
+from app.access_log import set_mcp_request_context
 from app.database import engine, Base, SessionLocal
 from app.models import AccessLog
 from app.routers import auth, credential, admin, oauth
@@ -80,12 +81,26 @@ class _McpTrailingSlashFix:
     Starlette Router 決定路由之前，直接把路徑補上尾斜線再往下傳，同一個請求
     內處理完，client 端完全不會看到任何轉址，也就不會有 header 掉的問題。
     必須包住整個 app（而不是只包 /mcp 掛載的 sub-app），因為 Router 比對路徑
-    是否命中 Mount 這一步，發生在 sub-app 被呼叫之前。"""
+    是否命中 Mount 這一步，發生在 sub-app 被呼叫之前。
+
+    同時順便把這次連線的 client IP／HTTP method 存進 access_log 的 contextvar：
+    mcp.py 的 _JwtTokenVerifier 只拿得到 token 字串、沒有 Request 物件，唯一能
+    取得這兩個值的地方就是這裡的原始 ASGI scope。"""
 
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"].startswith("/mcp"):
+            headers = dict(scope.get("headers") or [])
+            forwarded_for = headers.get(b"x-forwarded-for")
+            if forwarded_for:
+                ip = forwarded_for.decode().split(",")[0].strip()
+            else:
+                client = scope.get("client")
+                ip = client[0] if client else None
+            set_mcp_request_context(ip=ip, method=scope.get("method"))
+
         if scope["type"] == "http" and scope["path"] == "/mcp":
             scope = dict(scope)
             scope["path"] = "/mcp/"

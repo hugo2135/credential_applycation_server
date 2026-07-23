@@ -61,7 +61,12 @@ def test_mcp_oauth_access_is_logged(client, admin_token, mcp_access_token, live_
     logs = client.get(
         "/api/admin/access-logs", headers=admin_headers, params={"email": email, "auth_method": "oauth"},
     ).json()
-    assert any(l["path"] == "/mcp" and l["auth_method"] == "oauth" for l in logs)
+    matches = [l for l in logs if l["path"] == "/mcp" and l["auth_method"] == "oauth"]
+    assert matches
+    # /mcp 的驗證點沒有 Request 物件，IP/method 是從 main.py 的 ASGI wrapper 透過
+    # contextvar 補進來的（見 app/access_log.py），這裡要確認真的有補到，不是 null。
+    assert matches[0]["ip_address"] is not None
+    assert matches[0]["method"] is not None
 
 
 def test_pat_access_is_logged(client, admin_token, active_user, live_server):
@@ -76,7 +81,10 @@ def test_pat_access_is_logged(client, admin_token, active_user, live_server):
     logs = client.get(
         "/api/admin/access-logs", headers=admin_headers, params={"email": email, "auth_method": "pat"},
     ).json()
-    assert any(l["path"] == "/mcp" and l["auth_method"] == "pat" for l in logs)
+    matches = [l for l in logs if l["path"] == "/mcp" and l["auth_method"] == "pat"]
+    assert matches
+    assert matches[0]["ip_address"] is not None
+    assert matches[0]["method"] is not None
 
 
 def test_access_logs_export_csv(client, admin_token, active_user):
