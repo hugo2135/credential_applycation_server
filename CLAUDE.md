@@ -46,6 +46,8 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 - `/mcp` 的驗證點（`TokenVerifier.verify_token()`）介面只給 token 字串、拿不到 `Request` 物件，IP／HTTP method 要記錄下來得靠 `main.py` 的 `_McpTrailingSlashFix`（ASGI 層，比 FastAPI 的 Request 更早）從原始 scope 讀出來、存進 `app/access_log.py` 的 contextvar，`_JwtTokenVerifier` 再讀出來寫進 log。這個 contextvar 是 per-task 的，並發請求之間不會互相污染。
 - `PbiConfig.query_modes`（資料曝光範圍模式）跟 `filters` 是兩個獨立機制、疊加而非取代：`get_model_detail` 帶 `mode_id` 時只把該模式的 `filters` 包成一筆 `alwaysApply=true` 的 filter profile 塞進既有 `filters` 陣列尾端，skill 端原本的比對邏輯完全不用改；`mode.tables` 為空代表不限制表範圍（不是「全部不給看」）。存取限制沿用既有的 `UserPbiConfig` 指派機制，沒有另外做使用者-模式層級的授權——同一份資料要給不同部門看不同範圍，作法是管理員建立多個 `PbiConfig`（各自定義相關 `query_modes`）分別指派，不是同一個設定裡限制特定使用者只能用某些模式。
 - `PbiConfig.column_aliases`（重點欄位別名）不受 `mode_id` 影響，`get_model_detail` 固定整包回傳；跟 `filters` 是完全不同的機制——`filters` 是關鍵字比對後注入整段 DAX 布林運算式，`column_aliases` 是「欄位＋值＋同義詞」的對照表，給 skill 在生成 DAX 前把使用者的自然語言用詞（例如「北部」）轉換成 Power BI 實際存的欄位值（例如 `"North"`）。
+- `admin.py` 的 `PATCH /pbi-configs/batch-update` **必須**註冊在 `PATCH /pbi-configs/{config_id}` 之前——FastAPI 依路由註冊順序比對，`{config_id}` 這種單一路徑段會把字面上的 `"batch-update"` 當成 config_id 吃掉，順序反了會變成一直 404「找不到 PBI 設定：batch-update」，不會進到批次更新的邏輯。批次修改刻意只開放 `workspace_id`/`dataset_id`/`column_aliases`（底層 dataset 本身的屬性，多設定共用同一份資料時理應一致），`filters`/`query_modes` 不給批次改，因為它們的存在目的就是讓不同設定之間刻意不同（部門區隔），批次覆蓋容易靜默破壞管理員已經調好的存取範圍。
+- 「複製 PBI 設定」（`POST /pbi-configs/{id}/duplicate`）連同最新一版 `ModelChunk` 一起複製成新設定的版本 1，複製後兩份設定完全獨立（物理複製，不是共用連結）——上游語意模型變動時兩邊都要各自重新上傳，不會自動同步。
 
 ## 分支策略
 

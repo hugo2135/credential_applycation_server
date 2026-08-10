@@ -183,6 +183,8 @@ Access token 是 1 小時效期的 JWT；refresh token 90 天效期、每次使�
 | GET | `/api/admin/pbi-configs/{id}` | 取得單一 PBI 設定（詳情頁用） |
 | POST | `/api/admin/pbi-configs` | 建立 PBI 設定（僅 `name`，其餘欄位建立後在詳情頁設定） |
 | PATCH | `/api/admin/pbi-configs/{id}` | 更新 PBI 設定（`workspace_id`/`dataset_id`/`filters`/`query_modes`/`column_aliases`，皆為選填、只更新有帶的欄位） |
+| POST | `/api/admin/pbi-configs/{id}/duplicate` | 複製 PBI 設定（連同 `filters`/`query_modes`/`column_aliases`/最新一版語意模型一起複製，複製後兩份彼此獨立） |
+| PATCH | `/api/admin/pbi-configs/batch-update` | 批次修改多筆 PBI 設定（僅開放 `workspace_id`/`dataset_id`/`column_aliases`，`filters`/`query_modes` 刻意不給批次覆蓋） |
 | DELETE | `/api/admin/pbi-configs/{id}` | 刪除 PBI 設定（含關聯語意模型） |
 | POST | `/api/admin/model/upload` | 上傳語意模型（接受原始 PBI JSON） |
 | GET | `/api/admin/model/versions` | 列出所有版本 |

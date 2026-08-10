@@ -407,6 +407,21 @@ class PbiConfigUpdate(BaseModel):
     column_aliases: Optional[list[ColumnAliasGroup]] = None
 
 
+class PbiConfigDuplicateRequest(BaseModel):
+    name: str
+
+
+class BatchPbiConfigUpdateRequest(BaseModel):
+    """批次修改只開放 workspace_id/dataset_id/column_aliases——這三個是底層 Power BI
+    dataset 本身的屬性，多個設定共用同一份資料時理應一致。filters/query_modes 刻意
+    不給批次改，因為它們存在的目的就是讓不同設定之間刻意不同（部門區隔），批次覆蓋
+    容易靜默破壞管理員已經調好的存取範圍。"""
+    config_ids: list[str]
+    workspace_id: Optional[str] = None
+    dataset_id: Optional[str] = None
+    column_aliases: Optional[list[ColumnAliasGroup]] = None
+
+
 def _pbi_config_dict(c: PbiConfig) -> dict:
     return {
         "id": c.id,
@@ -449,6 +464,28 @@ def create_pbi_config(body: PbiConfigCreate, _=Depends(_require_admin_jwt), db: 
     return {"id": config.id, "name": config.name, "message": "PBI 設定建立成功"}
 
 
+# 一定要在 PATCH /pbi-configs/{config_id} 之前註冊：FastAPI 依註冊順序比對路由，
+# {config_id} 這種單一路徑段會吃掉字面上的 "batch-update"，順序反了會變成
+# 「找不到 PBI 設定：batch-update」的 404，而不是真的執行批次更新。
+@router.patch("/pbi-configs/batch-update")
+def batch_update_pbi_configs(
+    body: BatchPbiConfigUpdateRequest,
+    _=Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    configs = db.query(PbiConfig).filter(PbiConfig.id.in_(body.config_ids)).all()
+    for config in configs:
+        if body.workspace_id is not None:
+            config.workspace_id = body.workspace_id
+        if body.dataset_id is not None:
+            config.dataset_id = body.dataset_id
+        if body.column_aliases is not None:
+            config.column_aliases = [a.model_dump() for a in body.column_aliases]
+        config.updated_at = datetime.utcnow()
+    db.commit()
+    return {"message": f"已更新 {len(configs)} 筆 PBI 設定"}
+
+
 @router.patch("/pbi-configs/{config_id}")
 def update_pbi_config(
     config_id: str,
@@ -472,6 +509,51 @@ def update_pbi_config(
     config.updated_at = datetime.utcnow()
     db.commit()
     return {"message": "PBI 設定更新成功"}
+
+
+@router.post("/pbi-configs/{config_id}/duplicate", status_code=201)
+def duplicate_pbi_config(
+    config_id: str,
+    body: PbiConfigDuplicateRequest,
+    _=Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    source = db.query(PbiConfig).filter(PbiConfig.id == config_id).first()
+    if not source:
+        raise HTTPException(status_code=404, detail="找不到 PBI 設定")
+    if db.query(PbiConfig).filter(PbiConfig.name == body.name).first():
+        raise HTTPException(status_code=409, detail="名稱已存在")
+
+    new_config = PbiConfig(
+        name=body.name,
+        workspace_id=source.workspace_id,
+        dataset_id=source.dataset_id,
+        filters=source.filters,
+        query_modes=source.query_modes,
+        column_aliases=source.column_aliases,
+    )
+    db.add(new_config)
+    db.flush()  # 先取得 new_config.id，語意模型才有 pbi_config_id 可以掛
+
+    latest = (
+        db.query(ModelChunk)
+        .filter(ModelChunk.pbi_config_id == config_id)
+        .order_by(ModelChunk.model_version.desc())
+        .first()
+    )
+    if latest:
+        db.add(ModelChunk(
+            model_version=1,
+            name=latest.name,
+            pbi_config_id=new_config.id,
+            model_description=latest.model_description,
+            relationships=latest.relationships,
+            tables=latest.tables,
+        ))
+
+    db.commit()
+    db.refresh(new_config)
+    return {"id": new_config.id, "name": new_config.name, "message": "PBI 設定複製成功"}
 
 
 @router.delete("/pbi-configs/{config_id}", status_code=204)
