@@ -146,7 +146,9 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
 
 取得指定 PBI 設定的 Power BI access token（server 端用使用者的 Azure AD 憑證去跟 Azure AD 換）。
 
-> ⚠️ **這支 tool 不執行查詢**。查詢是 Skill 自己拿這個 token 直接對 Power BI 的 `executeQueries` REST API 發請求——這是刻意的設計，不是漏做：如果讓 server 代為執行查詢並等待/轉發結果，並發多個查詢時會讓 server 端的同步網路呼叫互相卡住（甚至拖垮整個服務的回應能力，包含跟這次查詢完全無關的其他使用者）。Claude Apps 的沙盒環境本身可以直接呼叫外部 REST API（這不是問題），所以查詢執行放回 Skill 端執行對雙方都更安全、更好擴充。
+> ⚠️ **這支 tool 不執行查詢**。查詢是 Skill 自己拿這個 token 直接對 Power BI 的 `executeQueries` REST API 發請求——這是刻意的設計，不是漏做：如果讓 server 代為執行查詢並等待/轉發結果，並發多個查詢時會讓 server 端的同步網路呼叫互相卡住（甚至拖垮整個服務的回應能力，包含跟這次查詢完全無關的其他使用者）。查詢執行放回 Skill 端執行對雙方都更安全、更好擴充。
+>
+> **前提：使用者的 Claude 執行環境要放行 `api.powerbi.com`**。Claude Apps 的 code execution 沙盒（以及 Claude Desktop 的 local agent mode）預設會擋未知網域的對外連線，需要使用者自行到 Claude Settings → Capabilities → Network egress 把 `api.powerbi.com` 加入白名單，否則 Skill 執行 `executeQueries` 時會收到類似 `Tunnel connection failed: 403 Forbidden` 的錯誤（但 `get_powerbi_token` 這支 tool 本身仍會成功，因為那是走 MCP 連線，不受這個沙盒網路限制影響）。這個設定步驟請寫進 Skill 自己的安裝教學。
 
 **輸入**：`pbi_config_id: str`
 

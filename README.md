@@ -56,6 +56,7 @@ Token issuance calls Azure AD (MSAL) synchronously, so it runs in a worker threa
 - Per-user many-to-many semantic-model assignment; per-config **filter rules**, **query modes** (scoped table/filter presets), and **column-value aliases** (NL synonym → canonical value) distributed to clients
 - Semantic-model versioning: admins upload raw Power BI model JSON; the server parses relationships/tables and serves named versions
 - One consolidated admin page per PBI config (`/admin/pbi-configs/{id}`) — connection settings, model versions, filters, query modes, and column aliases all in one place
+- PBI config **duplicate** (copies settings + latest model version, for spinning up a sibling config e.g. per department) and **batch update** scoped to workspace/dataset ID and column aliases only — filters and query modes are deliberately excluded since they're meant to differ per config
 - **Access history**: every authenticated hit to `/auth/*`, `/mcp`, or the legacy `/api/*` is logged (who, when, which auth method); 90-day retention with a CSV export at `/admin/access-logs`
 
 ## Testing
