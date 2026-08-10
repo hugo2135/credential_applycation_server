@@ -371,6 +371,28 @@ class FilterProfile(BaseModel):
     filters: list[FilterRule] = []
 
 
+class QueryMode(BaseModel):
+    """資料曝光範圍模式：限定這個模式下能看到哪些表、外加該模式專屬的篩選條件（疊加在
+    filters 比對出來的結果之上，不取代）。存取限制沿用既有的 PBI 設定指派機制，不另外
+    做使用者-模式層級的授權。"""
+    mode_id: str
+    name: str
+    description: Optional[str] = None
+    tables: list[str] = []
+    filters: list[FilterRule] = []
+
+
+class ColumnValueAlias(BaseModel):
+    value: str
+    aliases: list[str] = []
+
+
+class ColumnAliasGroup(BaseModel):
+    table: str
+    column: str
+    values: list[ColumnValueAlias] = []
+
+
 class PbiConfigCreate(BaseModel):
     name: str
     workspace_id: Optional[str] = None
@@ -381,22 +403,35 @@ class PbiConfigUpdate(BaseModel):
     workspace_id: Optional[str] = None
     dataset_id: Optional[str] = None
     filters: Optional[list[FilterProfile]] = None
+    query_modes: Optional[list[QueryMode]] = None
+    column_aliases: Optional[list[ColumnAliasGroup]] = None
+
+
+def _pbi_config_dict(c: PbiConfig) -> dict:
+    return {
+        "id": c.id,
+        "name": c.name,
+        "workspace_id": c.workspace_id,
+        "dataset_id": c.dataset_id,
+        "filters": c.filters or [],
+        "query_modes": c.query_modes or [],
+        "column_aliases": c.column_aliases or [],
+        "updated_at": c.updated_at,
+    }
 
 
 @router.get("/pbi-configs")
 def list_pbi_configs(_=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
     configs = db.query(PbiConfig).all()
-    return [
-        {
-            "id": c.id,
-            "name": c.name,
-            "workspace_id": c.workspace_id,
-            "dataset_id": c.dataset_id,
-            "filters": c.filters or [],
-            "updated_at": c.updated_at,
-        }
-        for c in configs
-    ]
+    return [_pbi_config_dict(c) for c in configs]
+
+
+@router.get("/pbi-configs/{config_id}")
+def get_pbi_config(config_id: str, _=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
+    config = db.query(PbiConfig).filter(PbiConfig.id == config_id).first()
+    if not config:
+        raise HTTPException(status_code=404, detail="找不到 PBI 設定")
+    return _pbi_config_dict(config)
 
 
 @router.post("/pbi-configs", status_code=201)
@@ -430,6 +465,10 @@ def update_pbi_config(
         config.dataset_id = body.dataset_id
     if body.filters is not None:
         config.filters = [f.model_dump() for f in body.filters]
+    if body.query_modes is not None:
+        config.query_modes = [m.model_dump() for m in body.query_modes]
+    if body.column_aliases is not None:
+        config.column_aliases = [a.model_dump() for a in body.column_aliases]
     config.updated_at = datetime.utcnow()
     db.commit()
     return {"message": "PBI 設定更新成功"}

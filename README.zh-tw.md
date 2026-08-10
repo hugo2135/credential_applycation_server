@@ -95,8 +95,8 @@ python -c "import secrets; print(secrets.token_hex(32))"
 | `/mcp-tokens` | 使用者 | 產生／撤銷 MCP Personal Access Token（給不支援 OAuth 的 MCP client，例如 Antigravity） |
 | `/admin/login` | 管理員 | 輸入 ADMIN_SECRET，取得 1 小時 JWT |
 | `/admin/users` | 管理員 | 使用者管理 |
-| `/admin/pbi-configs` | 管理員 | PBI 連線設定管理 |
-| `/admin/model` | 管理員 | 語意模型版本管理 |
+| `/admin/pbi-configs` | 管理員 | PBI 設定列表（建立／刪除） |
+| `/admin/pbi-configs/{id}` | 管理員 | PBI 設定詳情（Tab：基本設定／語意模型版本／篩選規則／查詢模式／篩選欄位別名，一站式管理） |
 | `/admin/access-logs` | 管理員 | 存取歷史查詢／匯出（`/dashboard`、`/mcp`、`/mcp-tokens`、`/api` 等，保留 90 天） |
 
 ## API 端點
@@ -140,8 +140,8 @@ Access token 是 1 小時效期的 JWT；refresh token 90 天效期、每次使�
 
 | Tool | 參數 | 說明 |
 |------|------|------|
-| `list_models` | 無 | 列出使用者可存取的模型（輕量版：id、名稱、說明、表數量） |
-| `get_model_detail` | `pbi_config_id` | 取得完整 relationships + tables 結構，含 `workspace_id`/`dataset_id`/`filters`（管理員在 `/admin/pbi-configs` 維護的篩選規則） |
+| `list_models` | 無 | 列出使用者可存取的模型（輕量版：id、名稱、說明、表數量、`query_modes`） |
+| `get_model_detail` | `pbi_config_id`、`mode_id`（選填） | 取得完整 relationships + tables 結構，含 `workspace_id`/`dataset_id`/`filters`/`column_aliases`。帶 `mode_id` 時只回該「資料曝光範圍模式」設定的表，且該模式的篩選規則會疊加成一筆 `alwaysApply` filter profile；不帶時行為與加這個功能前完全一樣 |
 | `get_powerbi_token` | `pbi_config_id` | 核發該設定的 Power BI access token（`access_token`/`token_type`/`expires_in`），**查詢由呼叫端自己直接打 Power BI executeQueries API 執行**，server 不代理查詢本身 |
 
 `get_powerbi_token` 內部同步呼叫 Azure AD（MSAL），用 `anyio.to_thread.run_sync` 丟到背景執行緒執行，避免併發請求時卡住 event loop（早期版本 `run_dax_query` 直接在 server 端執行查詢＋同步阻塞呼叫，並發量大時會拖垮整個服務，已改為現在這個設計）。
@@ -180,8 +180,9 @@ Access token 是 1 小時效期的 JWT；refresh token 90 天效期、每次使�
 | GET | `/api/admin/access-logs` | 查詢存取歷史（可依 email/auth_method/時間區間篩選，只留 90 天） |
 | GET | `/api/admin/access-logs/export` | 匯出存取歷史為 CSV |
 | GET | `/api/admin/pbi-configs` | 列出所有 PBI 設定 |
-| POST | `/api/admin/pbi-configs` | 建立 PBI 設定 |
-| PATCH | `/api/admin/pbi-configs/{id}` | 更新 PBI 設定（含 `filters` 篩選規則） |
+| GET | `/api/admin/pbi-configs/{id}` | 取得單一 PBI 設定（詳情頁用） |
+| POST | `/api/admin/pbi-configs` | 建立 PBI 設定（僅 `name`，其餘欄位建立後在詳情頁設定） |
+| PATCH | `/api/admin/pbi-configs/{id}` | 更新 PBI 設定（`workspace_id`/`dataset_id`/`filters`/`query_modes`/`column_aliases`，皆為選填、只更新有帶的欄位） |
 | DELETE | `/api/admin/pbi-configs/{id}` | 刪除 PBI 設定（含關聯語意模型） |
 | POST | `/api/admin/model/upload` | 上傳語意模型（接受原始 PBI JSON） |
 | GET | `/api/admin/model/versions` | 列出所有版本 |
@@ -202,7 +203,7 @@ Access token 是 1 小時效期的 JWT；refresh token 90 天效期、每次使�
 
 ## 語意模型上傳
 
-管理員在 `/admin/model` 頁面可：
+管理員在 PBI 設定詳情頁（`/admin/pbi-configs/{id}` 的「語意模型版本」Tab）可：
 - 上傳原始 Power BI JSON（`clientDataModel` 格式），後端自動解析，需指定關聯的 PBI 設定
 - 為版本命名，方便識別
 - 依 PBI 設定篩選版本列表
@@ -219,7 +220,7 @@ python scripts/chunk_model.py path/to/model.json
 | 資料表 | 說明 |
 |--------|------|
 | `users` | 帳號、密碼 hash、mask_key hash、Azure AD 憑證（AES-256-GCM 加密）、啟用狀態、到期時間、`failed_login_attempts`（累積 5 次密碼錯誤鎖定，僅能由管理員解鎖） |
-| `pbi_config` | Power BI 連線設定（workspace_id、dataset_id、`filters` 篩選規則陣列） |
+| `pbi_config` | Power BI 連線設定（workspace_id、dataset_id、`filters` 篩選規則陣列、`query_modes` 資料曝光範圍模式陣列、`column_aliases` 重點欄位值別名陣列） |
 | `user_pbi_configs` | 使用者與 PBI 設定的多對多指派關係 |
 | `model_chunks` | 語意模型版本（版本號、名稱、pbi_config_id、relationships JSON、tables JSON） |
 | `oauth_clients` | MCP connector 透過 DCR 註冊的 client（public client，不存 secret） |

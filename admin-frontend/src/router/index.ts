@@ -51,10 +51,10 @@ const router = createRouter({
       meta: { layout: 'admin', requiresAuth: 'admin', title: 'PBI 管理後台 - PBI 設定' },
     },
     {
-      path: '/admin/model',
-      name: 'admin-model',
-      component: () => import('@/views/ModelView.vue'),
-      meta: { layout: 'admin', requiresAuth: 'admin', title: 'PBI 管理後台 - 語意模型' },
+      path: '/admin/pbi-configs/:id',
+      name: 'admin-pbi-config-detail',
+      component: () => import('@/views/PbiConfigDetailView.vue'),
+      meta: { layout: 'admin', requiresAuth: 'admin', title: 'PBI 管理後台 - PBI 設定詳情' },
     },
     {
       path: '/admin/access-logs',

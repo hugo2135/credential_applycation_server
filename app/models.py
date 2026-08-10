@@ -16,6 +16,8 @@ class PbiConfig(Base):
     workspace_id = Column(String, nullable=True)
     dataset_id = Column(String, nullable=True)
     filters = Column(JSON, nullable=True)  # list[dict]，篩選設定檔（filterId/name/alwaysApply/...）
+    query_modes = Column(JSON, nullable=True)  # list[dict]，資料曝光範圍模式（mode_id/name/tables/filters）
+    column_aliases = Column(JSON, nullable=True)  # list[dict]，重點欄位值的別名對照（table/column/values[{value,aliases}]）
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 

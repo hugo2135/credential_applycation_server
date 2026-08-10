@@ -5,7 +5,7 @@
         PBI Admin
       </div>
       <el-menu
-        :default-active="route.path"
+        :default-active="activeMenuIndex"
         router
         background-color="#001529"
         text-color="#ffffffa0"
@@ -18,10 +18,6 @@
         <el-menu-item index="/admin/pbi-configs">
           <el-icon><Setting /></el-icon>
           <span>PBI 設定</span>
-        </el-menu-item>
-        <el-menu-item index="/admin/model">
-          <el-icon><Upload /></el-icon>
-          <span>語意模型</span>
         </el-menu-item>
         <el-menu-item index="/admin/access-logs">
           <el-icon><Clock /></el-icon>
@@ -57,10 +53,13 @@ const auth = useAuthStore()
 const titleMap: Record<string, string> = {
   '/admin/users': '使用者管理',
   '/admin/pbi-configs': 'PBI 設定管理',
-  '/admin/model': '語意模型管理',
   '/admin/access-logs': '存取歷史',
 }
-const pageTitle = computed(() => titleMap[route.path] ?? '')
+// /admin/pbi-configs/:id 這種巢狀路徑，選單跟標題都比照父層 /admin/pbi-configs 顯示
+const activeMenuIndex = computed(() =>
+  route.path.startsWith('/admin/pbi-configs/') ? '/admin/pbi-configs' : route.path,
+)
+const pageTitle = computed(() => titleMap[activeMenuIndex.value] ?? '')
 
 function handleLogout() {
   auth.logout()

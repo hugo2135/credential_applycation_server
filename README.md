@@ -36,8 +36,8 @@ Vue 3 SPA (same origin)
 
 | Tool | Purpose |
 |---|---|
-| `list_models` | Lightweight list of the user's accessible models (id, name, description, table count) |
-| `get_model_detail` | Full relationships + tables structure, with workspace/dataset IDs and admin-maintained filter rules |
+| `list_models` | Lightweight list of the user's accessible models (id, name, description, table count, available query modes) |
+| `get_model_detail` | Full relationships + tables structure, with workspace/dataset IDs, filter rules, and column-value aliases; an optional `mode_id` scopes `tables` to a data-exposure "query mode" and merges its filters in |
 | `get_powerbi_token` | Issues a Power BI access token; the client executes DAX queries against the Power BI executeQueries API directly — the server does not proxy queries |
 
 Token issuance calls Azure AD (MSAL) synchronously, so it runs in a worker thread (`anyio.to_thread.run_sync`) to keep the event loop responsive — a redesign after an earlier version that executed queries server-side and degraded under concurrency.
@@ -53,8 +53,9 @@ Token issuance calls Azure AD (MSAL) synchronously, so it runs in a worker threa
 ## Core capabilities
 
 - User lifecycle with admin approval, expiry dates, key/token reset, and **batch operations** (activate, assign, delete)
-- Per-user many-to-many semantic-model assignment; per-config **filter rules** distributed to clients
+- Per-user many-to-many semantic-model assignment; per-config **filter rules**, **query modes** (scoped table/filter presets), and **column-value aliases** (NL synonym → canonical value) distributed to clients
 - Semantic-model versioning: admins upload raw Power BI model JSON; the server parses relationships/tables and serves named versions
+- One consolidated admin page per PBI config (`/admin/pbi-configs/{id}`) — connection settings, model versions, filters, query modes, and column aliases all in one place
 - **Access history**: every authenticated hit to `/auth/*`, `/mcp`, or the legacy `/api/*` is logged (who, when, which auth method); 90-day retention with a CSV export at `/admin/access-logs`
 
 ## Testing

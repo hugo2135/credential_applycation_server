@@ -62,15 +62,19 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
   "pbi_config_name": "財務模型 A",
   "model_version": 5,
   "model_description": "以 Markdown 撰寫的模型概覽說明，管理員填的，可能是 null",
-  "table_count": 12
+  "table_count": 12,
+  "query_modes": [
+    { "mode_id": "summary", "name": "摘要模式", "description": "只看高階彙總表，可能是 null" }
+  ]
 }
 ```
+`query_modes` 是管理員在 `/admin/pbi-configs/{id}` 詳情頁設定的「資料曝光範圍模式」，沒設定時是空陣列 `[]`。**如果某個 `pbi_config_id` 底下有多個 `query_modes`，Skill 應該先問使用者要用哪一個**（例如列出 `name`/`description` 讓使用者選），再把選到的 `mode_id` 帶進 `get_model_detail`；只有一個或沒有的話不需要問，直接照原本流程走即可。
 
 ### `get_model_detail`
 
-取得指定 PBI 設定的完整語意模型結構，DAX 生成前查表格/欄位/量值用，**也是查詢這個模型所需的 `workspace_id`/`dataset_id`、以及篩選規則 `filters` 的來源**。
+取得指定 PBI 設定的完整語意模型結構，DAX 生成前查表格/欄位/量值用，**也是查詢這個模型所需的 `workspace_id`/`dataset_id`、篩選規則 `filters`、欄位別名 `column_aliases` 的來源**。
 
-**輸入**：`pbi_config_id: str`
+**輸入**：`pbi_config_id: str`，`mode_id: str`（選填，來自 `list_models` 的 `query_modes`）
 
 **輸出**：`dict`
 ```json
@@ -80,6 +84,7 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
   "model_version": 5,
   "workspace_id": "e6833b06-998f-45c2-a6c7-43a402d6e12e",
   "dataset_id": "2097b78b-b3df-40f9-9478-680e324acd50",
+  "query_mode_id": "summary",
   "filters": [
     {
       "filterId": "exclude-return-orders",
@@ -90,6 +95,16 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
       "contextKeywords": [],
       "filters": [
         { "description": "排除退貨單", "expression": "Orders[order_type] <> \"return_order\"", "requiredTable": null }
+      ]
+    }
+  ],
+  "column_aliases": [
+    {
+      "table": "Orders",
+      "column": "region",
+      "values": [
+        { "value": "North", "aliases": ["北區", "北部"] },
+        { "value": "South", "aliases": ["南區", "南部"] }
       ]
     }
   ],
@@ -112,9 +127,9 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
   ]
 }
 ```
-使用者沒有這個 `pbi_config_id` 的存取權時回 tool error（不會洩漏該設定是否存在）。`filters` 由管理員在 `/admin/pbi-configs` 集中維護，沒設定時是空陣列 `[]`。
+使用者沒有這個 `pbi_config_id` 的存取權時回 tool error（不會洩漏該設定是否存在）。帶了不存在的 `mode_id` 也是 tool error。`filters`/`query_modes`/`column_aliases` 由管理員在 `/admin/pbi-configs/{id}` 詳情頁集中維護，沒設定時是空陣列 `[]`。
 
-**篩選規則的比對邏輯**（Skill 拿到 `filters` 陣列後，在生成 DAX 前依序執行）：
+**篩選規則的比對邏輯**（Skill 拿到 `filters` 陣列後，在生成 DAX 前依序執行——這段邏輯不因為有沒有帶 `mode_id` 而改變，模式篩選只是多一筆 `alwaysApply` 的設定檔混進同一個陣列裡）：
 
 1. **收集預設篩選**：把所有 `alwaysApply = true` 的設定檔的 `filters` 合併為「預設篩選集」。
 2. **比對情境設定檔**：掃描所有 `alwaysApply = false` 的設定檔，檢查其 `contextKeywords` 是否出現在使用者的需求文字中，符合的收集為「命中設定檔清單」。
@@ -122,6 +137,10 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
    - 命中設定檔中若有 `overrideDefaults = true`，該設定檔的 `filters` 完全取代預設篩選集（命中多個時以最後命中者優先）。
    - 否則把命中設定檔的 `filters` 追加到預設篩選集後面。
 4. 套用到 DAX 時要確認每條規則的 `requiredTable`（如有）——該資料表不在本次查詢範圍內就跳過這條規則。若最終篩選集為空，正常生成 DAX、不加篩選條件即可，不需要額外詢問使用者。
+
+**`mode_id` 對回應內容的影響**：帶了 `mode_id` 時，`tables` 只會回該模式設定的表名子集（該模式沒設 `tables` 則不限制、回全部）；同時 `filters` 陣列裡會多一筆 `filterId` 是 `mode:<mode_id>` 的 `alwaysApply` 設定檔，內容是該模式自己的篩選規則——**照上面同一套比對邏輯處理即可，不用特別區分**。
+
+**`column_aliases` 的使用方式**：這不受 `mode_id` 影響，固定回傳整個 PBI 設定的欄位別名對照。生成 DAX 前，先掃描使用者的需求文字，如果提到某個 `aliases` 裡的詞（例如「北部」），比對邏輯上就把它當成對應的 `value`（例如 `"North"`）寫進 DAX 篩選條件，而不是直接把使用者的原始用詞當成欄位值——這樣可以避免 DAX 因為值不存在資料裡而查不到結果。沒有比對到任何別名時，正常使用使用者的原始用詞即可。
 
 ### `get_powerbi_token`
 
@@ -168,14 +187,15 @@ Content-Type: application/json
 使用者觸發 Skill
        │
        ▼
-呼叫 list_models          ← 取回可用模型清單（id、名稱、說明、表數量）
+呼叫 list_models          ← 取回可用模型清單（id、名稱、說明、表數量、query_modes）
        │
        ├─ 只有一個模型 → 自動選定；多個 → 請使用者選
+       ├─ 選定的模型底下只有一個/沒有 query_mode → 不用問；多個 → 請使用者選一個 mode_id
        ▼
-呼叫 get_model_detail(pbi_config_id)   ← 取得完整 relationships + tables + workspace_id/dataset_id + filters
+呼叫 get_model_detail(pbi_config_id, mode_id?)   ← 取得完整 relationships + tables + workspace_id/dataset_id + filters + column_aliases
        │
        ▼
-依 filters 比對邏輯決定最終篩選集（見上方「篩選規則的比對邏輯」）
+依 filters 比對邏輯決定最終篩選集（見上方「篩選規則的比對邏輯」），並依 column_aliases 把使用者用詞轉換成實際欄位值
        │
        ▼
 Skill 依現有推理邏輯（辨識資料表 → 驗證關聯 → 抽欄位/量值 → 套用篩選集 → 生成 DAX）產出 DAX 查詢

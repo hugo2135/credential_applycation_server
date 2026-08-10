@@ -64,6 +64,8 @@ with engine.connect() as _conn:
         "ALTER TABLE users ADD COLUMN client_secret_enc TEXT",
         "ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE pbi_config ADD COLUMN filters TEXT",
+        "ALTER TABLE pbi_config ADD COLUMN query_modes TEXT",
+        "ALTER TABLE pbi_config ADD COLUMN column_aliases TEXT",
     ]:
         try:
             _conn.execute(text(_stmt))

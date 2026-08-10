@@ -50,6 +50,16 @@ async def _mcp_call(live_server, token):
             await session.list_tools()
 
 
+async def _mcp_call_tool(live_server, token, tool_name, arguments):
+    async with streamablehttp_client(
+        f"{live_server}/mcp/",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as (read_stream, write_stream, _):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            await session.call_tool(tool_name, arguments)
+
+
 def test_mcp_oauth_access_is_logged(client, admin_token, mcp_access_token, live_server):
     access_token, _pbi_config_id, user_id = mcp_access_token
     asyncio.run(_mcp_call(live_server, access_token))
@@ -67,6 +77,24 @@ def test_mcp_oauth_access_is_logged(client, admin_token, mcp_access_token, live_
     # contextvar 補進來的（見 app/access_log.py），這裡要確認真的有補到，不是 null。
     assert matches[0]["ip_address"] is not None
     assert matches[0]["method"] is not None
+
+
+def test_mcp_tool_invocation_is_logged_with_tool_name(client, admin_token, mcp_access_token, live_server):
+    """實際呼叫一個 tool（list_models）之後，除了 verify_token 那邊記的通用 "/mcp"，
+    還要多一筆更精確的 "/mcp/list_models"，讓管理員能看出「哪個功能被觸發」。"""
+    access_token, _pbi_config_id, user_id = mcp_access_token
+    asyncio.run(_mcp_call_tool(live_server, access_token, "list_models", {}))
+
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+    users_res = client.get("/api/admin/users", headers=admin_headers)
+    email = next(u["email"] for u in users_res.json() if u["id"] == user_id)
+
+    logs = client.get("/api/admin/access-logs", headers=admin_headers, params={"email": email}).json()
+    assert any(l["path"] == "/mcp" for l in logs)
+    tool_matches = [l for l in logs if l["path"] == "/mcp/list_models"]
+    assert tool_matches
+    assert tool_matches[0]["auth_method"] == "oauth"
+    assert tool_matches[0]["ip_address"] is not None
 
 
 def test_pat_access_is_logged(client, admin_token, active_user, live_server):

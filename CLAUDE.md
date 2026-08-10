@@ -42,7 +42,10 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 - `PbiConfig.filters` 是管理員在 `/admin/pbi-configs` 維護的篩選規則（JSON 陣列），透過 `get_model_detail` 交給 skill 端，取代原本 skill 本機 `filters/*.json` 的設計，格式與比對邏輯見 `docs/skill-integration.md`。
 - 裸路徑 `/mcp`（沒有尾斜線）**不能**用 HTTP 307 轉址到 `/mcp/` 處理——部分 MCP client（例如 Gemini）跟隨轉址重新發送請求時不會保留 `Authorization` header，會導致認證失敗。`main.py` 的 `_McpTrailingSlashFix` 改成在 ASGI 層、Starlette Router 判斷路由之前，直接把路徑內部改寫成 `/mcp/`，同一個請求處理完，client 端完全不會看到任何轉址；這個 wrapper 必須包住整個 `app`（不能只包 `/mcp` 掛載的 sub-app），因為 Router 判斷要不要進到 Mount 這一步，發生在 sub-app 被呼叫之前。
 - 存取歷史（`access_logs` 表）在三個既有身份驗證點各自補一行寫入（`auth.py` 的 `_require_user`、`mcp.py` 的 `_JwtTokenVerifier`、`credential.py` 的 `_resolve_user`），共用 `app/access_log.py` 的 `record_access()`，只記錄驗證成功的請求。只留 90 天，`main.py` 的 lifespan 開一個背景 task 每天清一次舊資料，沒有另外掛排程服務。
+- `mcp.py` 的存取紀錄分兩層：`_JwtTokenVerifier` 每個 HTTP request 都記一筆通用的 `path="/mcp"`（含 `initialize`/`list_tools` 這些協定層呼叫，用來看背景連線活動）；`_log_tool_access()` 額外在 `list_models`/`get_model_detail`/`get_powerbi_token` 三個 tool 各自呼叫，記一筆 `path="/mcp/{tool_name}"`，才看得出「哪個使用者觸發了哪個功能」。同一次真正的 tool 呼叫因此會有兩筆紀錄，這是刻意的（各自用途不同），不是重複寫入的 bug。
 - `/mcp` 的驗證點（`TokenVerifier.verify_token()`）介面只給 token 字串、拿不到 `Request` 物件，IP／HTTP method 要記錄下來得靠 `main.py` 的 `_McpTrailingSlashFix`（ASGI 層，比 FastAPI 的 Request 更早）從原始 scope 讀出來、存進 `app/access_log.py` 的 contextvar，`_JwtTokenVerifier` 再讀出來寫進 log。這個 contextvar 是 per-task 的，並發請求之間不會互相污染。
+- `PbiConfig.query_modes`（資料曝光範圍模式）跟 `filters` 是兩個獨立機制、疊加而非取代：`get_model_detail` 帶 `mode_id` 時只把該模式的 `filters` 包成一筆 `alwaysApply=true` 的 filter profile 塞進既有 `filters` 陣列尾端，skill 端原本的比對邏輯完全不用改；`mode.tables` 為空代表不限制表範圍（不是「全部不給看」）。存取限制沿用既有的 `UserPbiConfig` 指派機制，沒有另外做使用者-模式層級的授權——同一份資料要給不同部門看不同範圍，作法是管理員建立多個 `PbiConfig`（各自定義相關 `query_modes`）分別指派，不是同一個設定裡限制特定使用者只能用某些模式。
+- `PbiConfig.column_aliases`（重點欄位別名）不受 `mode_id` 影響，`get_model_detail` 固定整包回傳；跟 `filters` 是完全不同的機制——`filters` 是關鍵字比對後注入整段 DAX 布林運算式，`column_aliases` 是「欄位＋值＋同義詞」的對照表，給 skill 在生成 DAX 前把使用者的自然語言用詞（例如「北部」）轉換成 Power BI 實際存的欄位值（例如 `"North"`）。
 
 ## 分支策略
 
@@ -91,7 +94,7 @@ app/
     credential.py  /api（Skill legacy），也提供 acquire_powerbi_token 給 MCP 用
     admin.py       /api/admin（管理員）
     oauth.py       /oauth、/.well-known（OAuth 2.1 authorization server）
-    mcp.py         /mcp（MCP server + tools：list_models/get_model_detail/get_powerbi_token）
+    mcp.py         /mcp（MCP server + tools：list_models/get_model_detail(mode_id?)/get_powerbi_token）
 admin-frontend/    Vue 3 SPA（Element Plus + Pinia）
 scripts/
   chunk_model.py   離線工具：將原始 PBI JSON 拆分成 relationships + tables
@@ -109,12 +112,12 @@ docs/
 /dashboard          使用者登入後首頁（查看憑證狀態、領取 key，連結到 /mcp-tokens）
 /mcp-tokens         MCP Personal Access Token 自助管理（跟 PBI_MASK_KEY UI 刻意分開，避免混淆兩種機制）
 
-/admin              重導向至 /admin/login
-/admin/login        管理員登入
-/admin/users        使用者管理（管理員）
-/admin/pbi-configs  PBI 設定管理（管理員）
-/admin/model        語意模型管理（管理員）
-/admin/access-logs  存取歷史查詢／匯出（管理員）
+/admin                  重導向至 /admin/login
+/admin/login            管理員登入
+/admin/users            使用者管理（管理員）
+/admin/pbi-configs      PBI 設定列表（管理員，僅建立/刪除）
+/admin/pbi-configs/:id  PBI 設定詳情（管理員，Tab：基本設定/語意模型版本/篩選規則/查詢模式/篩選欄位別名，一站式管理，取代原本獨立的 /admin/model）
+/admin/access-logs      存取歷史查詢／匯出（管理員）
 ```
 
 管理員與使用者的 JWT 過期時，`admin-frontend/src/api/http.ts` 的 axios response 攔截器會在收到 401 時清除 token 並導回對應登入頁（管理員 → `/admin/login`）。**修改前端後必須執行 `npm run build --prefix admin-frontend` 重新產生 `dist/`**，否則 FastAPI 會繼續 serve 舊的靜態檔案，導致行為與原始碼不一致（例如導向錯誤的登入頁）。

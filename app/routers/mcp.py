@@ -102,6 +102,25 @@ def _current_user(db) -> User:
     return user
 
 
+def _log_tool_access(db, user: User, tool_name: str) -> None:
+    # _JwtTokenVerifier 只在每個 HTTP request 驗證 token 時記一筆通用的 "/mcp"，
+    # 不知道這個 request 實際觸發了哪個 tool（initialize/list_tools 這些協定層
+    # 呼叫也會經過那裡）。這裡額外補一筆更精確的紀錄，path 帶上實際的 tool 名稱，
+    # 讓管理員在 /admin/access-logs 能看到「哪個使用者、什麼時候、觸發了哪個功能」。
+    access_token = get_access_token()
+    auth_method = "pat" if access_token and access_token.client_id == "personal-access-token" else "oauth"
+    ctx = get_mcp_request_context()
+    record_access(
+        db,
+        user_id=user.id,
+        email=user.email,
+        auth_method=auth_method,
+        path=f"/mcp/{tool_name}",
+        method=ctx["method"],
+        ip_address=ctx["ip"],
+    )
+
+
 def _check_access(user: User, pbi_config_id: str, db) -> PbiConfig:
     link = db.query(UserPbiConfig).filter(
         UserPbiConfig.user_id == user.id,
@@ -147,6 +166,7 @@ def get_mcp_server() -> FastMCP:
         """列出目前使用者被授權存取的所有 PBI 語意模型（輕量版：id、名稱、說明、表數量，不含完整結構）。"""
         with SessionLocal() as db:
             user = _current_user(db)
+            _log_tool_access(db, user, "list_models")
             links = db.query(UserPbiConfig).filter(UserPbiConfig.user_id == user.id).all()
             result = []
             for link in links:
@@ -167,14 +187,23 @@ def get_mcp_server() -> FastMCP:
                     "model_version": latest.model_version,
                     "model_description": latest.model_description,
                     "table_count": len(latest.tables) if latest.tables else 0,
+                    "query_modes": [
+                        {"mode_id": m.get("mode_id"), "name": m.get("name"), "description": m.get("description")}
+                        for m in (config.query_modes or [])
+                    ],
                 })
             return result
 
     @server.tool()
-    async def get_model_detail(pbi_config_id: str) -> dict:
-        """取得指定 PBI 設定的完整語意模型結構（relationships + tables + filters），DAX 生成前查表格/欄位/量值/篩選規則用。"""
+    async def get_model_detail(pbi_config_id: str, mode_id: str | None = None) -> dict:
+        """取得指定 PBI 設定的完整語意模型結構（relationships + tables + filters + column_aliases），
+        DAX 生成前查表格/欄位/量值/篩選規則/欄位別名用。mode_id 選填：list_models 回傳的
+        query_modes 若有多個選項，先讓使用者選一個再帶進來，只回該模式範圍內的表，
+        且該模式自己的篩選規則會疊加成一筆 alwaysApply 的 filter profile。不帶 mode_id
+        時行為跟以前完全一樣（全表、不含模式篩選）。"""
         with SessionLocal() as db:
             user = _current_user(db)
+            _log_tool_access(db, user, "get_model_detail")
             config = _check_access(user, pbi_config_id, db)
             latest = (
                 db.query(ModelChunk)
@@ -184,20 +213,44 @@ def get_mcp_server() -> FastMCP:
             )
             if not latest:
                 raise ToolError("此 PBI 設定尚未上傳任何語意模型")
+
+            tables = latest.tables
+            filters = list(config.filters or [])
+            if mode_id:
+                mode = next((m for m in (config.query_modes or []) if m.get("mode_id") == mode_id), None)
+                if not mode:
+                    raise ToolError(f"找不到查詢模式：{mode_id}")
+                mode_tables = mode.get("tables") or []
+                if mode_tables:
+                    tables = [t for t in tables if t.get("table") in mode_tables]
+                if mode.get("filters"):
+                    filters.append({
+                        "filterId": f"mode:{mode_id}",
+                        "name": mode.get("name", mode_id),
+                        "description": mode.get("description"),
+                        "alwaysApply": True,
+                        "overrideDefaults": False,
+                        "contextKeywords": [],
+                        "filters": mode["filters"],
+                    })
+
             return {
                 "pbi_config_id": config.id,
                 "pbi_config_name": config.name,
                 "model_version": latest.model_version,
                 "workspace_id": config.workspace_id,
                 "dataset_id": config.dataset_id,
-                "filters": config.filters or [],
+                "query_mode_id": mode_id,
+                "filters": filters,
+                "column_aliases": config.column_aliases or [],
                 "relationships": latest.relationships,
-                "tables": latest.tables,
+                "tables": tables,
             }
 
     def _get_powerbi_token_sync(pbi_config_id: str) -> dict:
         with SessionLocal() as db:
             user = _current_user(db)
+            _log_tool_access(db, user, "get_powerbi_token")
             _check_access(user, pbi_config_id, db)
             if not user.tenant_id or not user.client_id or not user.client_secret_enc:
                 raise ToolError("Azure AD 憑證尚未設定，請聯絡管理員")
