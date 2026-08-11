@@ -30,11 +30,14 @@
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="Azure AD 憑證" width="110" align="center">
+      <el-table-column label="Azure AD 憑證" width="150" align="center">
         <template #default="{ row }">
           <el-tag :type="row.has_credentials ? 'success' : 'info'" size="small">
             {{ row.has_credentials ? '已設定' : '未設定' }}
           </el-tag>
+          <div v-if="row.has_credentials && secretExpiry(row)" style="margin-top: 4px">
+            <el-tag :type="secretExpiry(row)!.type" size="small">{{ secretExpiry(row)!.label }}</el-tag>
+          </div>
         </template>
       </el-table-column>
       <el-table-column label="已分配語意模型" min-width="180">
@@ -115,7 +118,21 @@
               placeholder="填入即更新，留空則取消"
             />
           </el-form-item>
+          <el-form-item label="Secret 到期日">
+            <el-date-picker
+              v-model="settingsDialog.credForm.client_secret_expires_at"
+              type="date"
+              placeholder="選填，建議照 Azure 上的到期日填"
+              style="width: 100%"
+            />
+          </el-form-item>
         </el-form>
+        <el-alert type="info" :closable="false" style="margin-bottom: 12px">
+          <template #title>
+            Azure AD 的 client secret 最長 24 個月。到期時使用者只會突然查不了、
+            錯誤訊息看不出原因，填了到期日列表才能提前警示。
+          </template>
+        </el-alert>
         <el-button type="primary" :loading="settingsDialog.saving" @click="saveCredentials">儲存</el-button>
       </el-tab-pane>
 
@@ -227,6 +244,7 @@ interface User {
   email: string
   is_active: boolean
   has_credentials: boolean
+  client_secret_expires_at: string | null
   pbi_config_ids: string[]
   expires_at: string | null
   is_locked: boolean
@@ -250,7 +268,7 @@ const settingsDialog = ref({
   user: null as User | null,
   activeTab: 'activate',
   activateForm: { isActive: false, expiresAt: null as Date | null },
-  credForm: { tenant_id: '', client_id: '', client_secret: '' },
+  credForm: { tenant_id: '', client_id: '', client_secret: '', client_secret_expires_at: null as Date | null },
   assignConfigIds: [] as string[],
   patTokens: [] as McpToken[],
   patLoading: false,
@@ -281,6 +299,18 @@ function fmtDate(d: string | null) {
   return formatDate(d)
 }
 
+const SECRET_EXPIRY_WARNING_DAYS = 30
+
+/** Azure AD client secret 的到期狀態。沒填到期日就不顯示（不是所有人都會維護這欄）。 */
+function secretExpiry(row: User): { type: 'danger' | 'warning'; label: string } | null {
+  const expiry = parseUtcDate(row.client_secret_expires_at)
+  if (!expiry) return null
+  const days = Math.ceil((expiry.getTime() - Date.now()) / 86400000)
+  if (days < 0) return { type: 'danger', label: 'Secret 已過期' }
+  if (days <= SECRET_EXPIRY_WARNING_DAYS) return { type: 'warning', label: `Secret ${days} 天後到期` }
+  return null
+}
+
 // ── 單一使用者設定彈窗 ──────────────────────────────────────────────
 
 function openSettings(row: User) {
@@ -290,7 +320,10 @@ function openSettings(row: User) {
     user: row,
     activeTab: 'activate',
     activateForm: { isActive: row.is_active, expiresAt: parseUtcDate(row.expires_at) },
-    credForm: { tenant_id: '', client_id: '', client_secret: '' },
+    credForm: {
+      tenant_id: '', client_id: '', client_secret: '',
+      client_secret_expires_at: parseUtcDate(row.client_secret_expires_at),
+    },
     assignConfigIds: [...(row.pbi_config_ids ?? [])],
     patTokens: [],
     patLoading: false,
@@ -350,7 +383,10 @@ async function saveCredentials() {
   }
   d.saving = true
   try {
-    await http.patch(`/users/${d.user.id}/credentials`, d.credForm)
+    await http.patch(`/users/${d.user.id}/credentials`, {
+      ...d.credForm,
+      client_secret_expires_at: d.credForm.client_secret_expires_at?.toISOString() ?? null,
+    })
     ElMessage.success('Azure AD 憑證設定成功')
     await load()
   } catch (e: any) {

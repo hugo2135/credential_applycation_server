@@ -34,6 +34,9 @@ class User(Base):
     tenant_id = Column(String, nullable=True)
     client_id = Column(String, nullable=True)
     client_secret_enc = Column(String, nullable=True)        # AES-GCM 加密後儲存
+    # Azure AD client secret 的到期日（管理員手動填）。Azure 的 secret 最長 24 個月，
+    # 到期時的症狀是使用者突然查不了、錯誤訊息看不出原因，所以需要提前警示。
+    client_secret_expires_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     expires_at = Column(DateTime, nullable=True)
     failed_login_attempts = Column(Integer, default=0, nullable=False)

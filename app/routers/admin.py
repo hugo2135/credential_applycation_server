@@ -76,6 +76,7 @@ def list_users(_=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
             "is_admin": u.is_admin,
             "pbi_config_ids": config_map.get(u.id, []),
             "has_credentials": bool(u.tenant_id and u.client_id and u.client_secret_enc),
+            "client_secret_expires_at": u.client_secret_expires_at,
             "expires_at": u.expires_at,
             "created_at": u.created_at,
             "is_locked": u.failed_login_attempts >= MAX_LOGIN_ATTEMPTS,
@@ -100,6 +101,9 @@ class UserCredentialsRequest(BaseModel):
     tenant_id: str
     client_id: str
     client_secret: str
+    # 選填：Azure AD 上這組 secret 的到期日。Azure 不會主動通知，過期時使用者只會
+    # 突然查不了，所以讓管理員設定當下就一併記下來，列表才能提前警示。
+    client_secret_expires_at: Optional[datetime] = None
 
 
 @router.post("/users/{user_id}/reset-mask-key")
@@ -332,6 +336,7 @@ def set_user_credentials(
     user.tenant_id = body.tenant_id
     user.client_id = body.client_id
     user.client_secret_enc = encrypt_secret(body.client_secret)
+    user.client_secret_expires_at = body.client_secret_expires_at
     db.commit()
     return {"message": "Azure AD 憑證設定成功"}
 

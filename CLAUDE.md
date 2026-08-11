@@ -38,6 +38,7 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 - **查詢本身由呼叫端直接打 Power BI executeQueries**，server 不代理查詢——這是刻意設計，早期版本讓 server 代跑查詢，同步阻塞的網路呼叫在並發時會卡住整個 event loop（MCP tool 沒有 FastAPI 那種自動 thread pool offload）。
 - MCP tool **不回傳 access token，只回傳一次性 ticket**（`get_query_ticket`，短效、單次使用、`access_tickets` 表只存 hash），由呼叫端的查詢腳本自己打 `POST /api/ticket/redeem` 兌換。動機是實測發現舊的 `get_powerbi_token` 會讓有效一小時的 Power BI 憑證完整進入對話上下文——tool 回傳值本身記一次，client 端把它 `Write` 成檔案時再記一次，而且還會落地到使用者的專案資料夾。**`access_tickets` 刻意不存 access token**：跟 Azure AD 換 token 是在 redeem 當下才做，所以那張表任何時候都不含可直接使用的憑證。MSAL 那個同步阻塞呼叫移到 redeem 端點後也不再需要 `anyio.to_thread.run_sync`——一般 FastAPI 端點本來就跑在 thread pool。
 - `/api/ticket/` 必須列在 `main.py` 的 `_IP_WHITELIST_EXEMPT_PREFIXES`：那是給使用者機器／沙盒上的腳本呼叫的，不可能在內網，安全性靠 ticket 本身而不是 IP。另外 skill 端的沙盒除了 `api.powerbi.com` 之外，還要把 `SITE_DOMAIN` 加進 Claude 的 network egress 白名單才能兌換（見 `docs/skill-integration.md`）。
+- `User.client_secret_expires_at` 是管理員手動填的 Azure AD secret 到期日（選填）。Azure 的 client secret 最長 24 個月且到期時不會主動通知，症狀只是使用者突然查不了、錯誤訊息看不出原因，所以 `/admin/users` 會在剩 30 天內或已過期時標紅/標黃。之後若真的去串 Microsoft Graph，可以改成從 application 的 `passwordCredentials.endDateTime` 自動同步，欄位不用動。
 - `acquire_powerbi_token()`（`credential.py`）每次呼叫都重建 `ConfidentialClientApplication`，MSAL 內建的 token cache 因此沒作用；已知但暫緩優化，見函式內 TODO 註記。
 - OAuth client 一律走 Dynamic Client Registration + PKCE（public client，不核發 client_secret）。
 - `/auth/login`、`/oauth/authorize` 的登入共用 `security.authenticate_user()`，累積 5 次密碼錯誤鎖定帳號（`User.failed_login_attempts`），只能由管理員在 `/admin/users` 解鎖，沒有自動過期解鎖。兩個入口共用同一組計數，其中一邊被鎖另一邊也會被鎖。

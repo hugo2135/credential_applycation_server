@@ -176,7 +176,7 @@ Access token 是 1 小時效期的 JWT；refresh token 90 天效期、每次使�
 | POST | `/api/admin/login` | 輸入 ADMIN_SECRET，回傳 1 小時 admin JWT |
 | GET | `/api/admin/users` | 列出所有使用者 |
 | PATCH | `/api/admin/users/activate` | 開通／停用帳號、設到期日 |
-| PATCH | `/api/admin/users/{id}/credentials` | 設定 Azure AD 憑證（Tenant / Client / Secret） |
+| PATCH | `/api/admin/users/{id}/credentials` | 設定 Azure AD 憑證（Tenant / Client / Secret，可選填 `client_secret_expires_at` 供到期警示） |
 | PUT | `/api/admin/users/{id}/pbi-configs` | 指派語意模型（多個） |
 | POST | `/api/admin/users/{id}/reset-mask-key` | 重設 PBI_MASK_KEY（清除 hash，使用者重新領取） |
 | POST | `/api/admin/users/{id}/unlock` | 解除登入失敗鎖定（累積 5 次密碼錯誤會鎖） |
@@ -230,7 +230,7 @@ python scripts/chunk_model.py path/to/model.json
 
 | 資料表 | 說明 |
 |--------|------|
-| `users` | 帳號、密碼 hash、mask_key hash、Azure AD 憑證（AES-256-GCM 加密）、啟用狀態、到期時間、`failed_login_attempts`（累積 5 次密碼錯誤鎖定，僅能由管理員解鎖） |
+| `users` | 帳號、密碼 hash、mask_key hash、Azure AD 憑證（AES-256-GCM 加密）、`client_secret_expires_at`（secret 到期日，供列表提前警示）、啟用狀態、到期時間、`failed_login_attempts`（累積 5 次密碼錯誤鎖定，僅能由管理員解鎖） |
 | `pbi_config` | Power BI 連線設定（workspace_id、dataset_id、`filters` 篩選規則陣列、`query_modes` 資料曝光範圍模式陣列、`column_aliases` 重點欄位值別名陣列） |
 | `user_pbi_configs` | 使用者與 PBI 設定的多對多指派關係 |
 | `model_chunks` | 語意模型版本（版本號、名稱、pbi_config_id、relationships JSON、tables JSON） |
