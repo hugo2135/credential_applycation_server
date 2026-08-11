@@ -36,7 +36,7 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 - `client_secret` 以 AES-256-GCM 加密存 DB，key 衍生自 `SERVER_JWT_SECRET`。
 - PBI_MASK_KEY 明文只在產生時回傳一次，DB 只存 SHA-256 hash；OAuth refresh token、MCP Personal Access Token（`personal_access_tokens` 表）比照辦理，只存 hash。`mcp.py` 的 `_JwtTokenVerifier` 驗證時先試 OAuth JWT，失敗再退回查 PAT hash——兩種 token 都能通過 `/mcp` 的身份驗證。
 - **查詢本身由呼叫端直接打 Power BI executeQueries**，server 不代理查詢——這是刻意設計，早期版本讓 server 代跑查詢，同步阻塞的網路呼叫在並發時會卡住整個 event loop（MCP tool 沒有 FastAPI 那種自動 thread pool offload）。
-- MCP tool **不回傳 access token，只回傳一次性 ticket**（`get_query_ticket`，60 秒、單次使用、`access_tickets` 表只存 hash），由呼叫端的查詢腳本自己打 `POST /api/ticket/redeem` 兌換。動機是實測發現舊的 `get_powerbi_token` 會讓有效一小時的 Power BI 憑證完整進入對話上下文——tool 回傳值本身記一次，client 端把它 `Write` 成檔案時再記一次，而且還會落地到使用者的專案資料夾。**`access_tickets` 刻意不存 access token**：跟 Azure AD 換 token 是在 redeem 當下才做，所以那張表任何時候都不含可直接使用的憑證。MSAL 那個同步阻塞呼叫移到 redeem 端點後也不再需要 `anyio.to_thread.run_sync`——一般 FastAPI 端點本來就跑在 thread pool。
+- MCP tool **不回傳 access token，只回傳一次性 ticket**（`get_query_ticket`，短效、單次使用、`access_tickets` 表只存 hash），由呼叫端的查詢腳本自己打 `POST /api/ticket/redeem` 兌換。動機是實測發現舊的 `get_powerbi_token` 會讓有效一小時的 Power BI 憑證完整進入對話上下文——tool 回傳值本身記一次，client 端把它 `Write` 成檔案時再記一次，而且還會落地到使用者的專案資料夾。**`access_tickets` 刻意不存 access token**：跟 Azure AD 換 token 是在 redeem 當下才做，所以那張表任何時候都不含可直接使用的憑證。MSAL 那個同步阻塞呼叫移到 redeem 端點後也不再需要 `anyio.to_thread.run_sync`——一般 FastAPI 端點本來就跑在 thread pool。
 - `/api/ticket/` 必須列在 `main.py` 的 `_IP_WHITELIST_EXEMPT_PREFIXES`：那是給使用者機器／沙盒上的腳本呼叫的，不可能在內網，安全性靠 ticket 本身而不是 IP。另外 skill 端的沙盒除了 `api.powerbi.com` 之外，還要把 `SITE_DOMAIN` 加進 Claude 的 network egress 白名單才能兌換（見 `docs/skill-integration.md`）。
 - `acquire_powerbi_token()`（`credential.py`）每次呼叫都重建 `ConfidentialClientApplication`，MSAL 內建的 token cache 因此沒作用；已知但暫緩優化，見函式內 TODO 註記。
 - OAuth client 一律走 Dynamic Client Registration + PKCE（public client，不核發 client_secret）。
@@ -83,6 +83,7 @@ npm run dev            # 同時啟動 uvicorn + Vite dev server
 | `DATABASE_URL` | 預設 `sqlite:///./credential.db` |
 | `SITE_DOMAIN` | 對外網域（不可為裸 IP）。Caddy 拿來申請 HTTPS 憑證，也是 OAuth issuer / MCP resource URL 的基礎 |
 | `ALLOWED_IPS` | IP 白名單，逗號分隔，留空不限制 |
+| `MCP_TICKET_TTL_SECONDS` | MCP 查詢 ticket 效期（秒），預設 300。動態讀取（`ticket.ticket_ttl_seconds()`），非法值/0/負數一律回退預設 |
 
 ## 目錄結構
 

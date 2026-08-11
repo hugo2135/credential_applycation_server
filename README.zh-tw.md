@@ -79,6 +79,7 @@ docker compose up -d
 | `DATABASE_URL` | 資料庫連線字串（預設 `sqlite:///./credential.db`） |
 | `ALLOWED_IPS` | IP 白名單，逗號分隔。留空表示不限制（例：`1.2.3.4,5.6.7.8`） |
 | `SITE_DOMAIN` | 對外網域（不能是裸 IP），Caddy 用來申請 HTTPS 憑證，也是 OAuth issuer / MCP resource URL 的基礎 |
+| `MCP_TICKET_TTL_SECONDS` | MCP 查詢 ticket 效期（秒），預設 300。ticket 發出到腳本兌換之間會夾雜使用者按權限確認的時間，訂太短會讓「晚幾十秒才按允許」變成查詢失敗 |
 
 產生安全的隨機金鑰：
 ```bash
@@ -142,7 +143,7 @@ Access token 是 1 小時效期的 JWT；refresh token 90 天效期、每次使�
 |------|------|------|
 | `list_models` | 無 | 列出使用者可存取的模型（輕量版：id、名稱、說明、表數量、`query_modes`） |
 | `get_model_detail` | `pbi_config_id`、`mode_id`（選填） | 取得完整 relationships + tables 結構，含 `workspace_id`/`dataset_id`/`filters`/`column_aliases`。帶 `mode_id` 時只回該「資料曝光範圍模式」設定的表，且該模式的篩選規則會疊加成一筆 `alwaysApply` filter profile；不帶時行為與加這個功能前完全一樣 |
-| `get_query_ticket` | `pbi_config_id` | 核發一次性 ticket（`ticket`/`redeem_url`/`expires_in`，60 秒、單次使用）。**不直接回傳 access token**——呼叫端的查詢腳本自己拿 ticket 打 `POST /api/ticket/redeem` 換 token，避免 token 進入對話上下文。**查詢一樣由呼叫端自己直接打 Power BI executeQueries API 執行**，server 不代理查詢本身 |
+| `get_query_ticket` | `pbi_config_id` | 核發一次性 ticket（`ticket`/`redeem_url`/`expires_in`，短效、單次使用）。**不直接回傳 access token**——呼叫端的查詢腳本自己拿 ticket 打 `POST /api/ticket/redeem` 換 token，避免 token 進入對話上下文。**查詢一樣由呼叫端自己直接打 Power BI executeQueries API 執行**，server 不代理查詢本身 |
 
 跟 Azure AD 換 token（MSAL 同步阻塞呼叫）發生在 `POST /api/ticket/redeem`，那是一般 FastAPI 端點、自動跑在 thread pool，不會卡住 event loop。`get_query_ticket` 本身只寫一列 DB，不打任何外部網路。（早期版本 `run_dax_query` 直接在 server 端執行查詢＋同步阻塞呼叫，並發量大時會拖垮整個服務，已改為現在這個設計。）
 
@@ -154,7 +155,7 @@ Access token 是 1 小時效期的 JWT；refresh token 90 天效期、每次使�
 |------|------|------|------|
 | POST | `/api/ticket/redeem` | ticket 本身 | 用 `get_query_ticket` 發的一次性 ticket 換 Power BI access token（`access_token`/`token_type`/`expires_in`） |
 
-不需要其他身份驗證——ticket 就是憑證（單次使用、60 秒過期、DB 只存 hash）。這條路徑在 `main.py` 列為 IP 白名單豁免，因為它是給使用者機器／沙盒上的腳本呼叫的，不可能在內網。設計動機與 Skill 端改法見 [docs/skill-integration.md](docs/skill-integration.md)。
+不需要其他身份驗證——ticket 就是憑證（單次使用、短效、DB 只存 hash；效期由 `MCP_TICKET_TTL_SECONDS` 控制，預設 300 秒）。這條路徑在 `main.py` 列為 IP 白名單豁免，因為它是給使用者機器／沙盒上的腳本呼叫的，不可能在內網。設計動機與 Skill 端改法見 [docs/skill-integration.md](docs/skill-integration.md)。
 
 ### 使用者 API（`/auth/*`）
 
@@ -238,7 +239,7 @@ python scripts/chunk_model.py path/to/model.json
 | `oauth_refresh_tokens` | 長效 refresh token（只存 hash，90 天效期，每次使用輪換） |
 | `personal_access_tokens` | MCP Personal Access Token（只存 hash，無到期時間，給不支援 OAuth 的 MCP client 用） |
 | `access_logs` | 使用者存取歷史（誰、何時、用哪種方式、打了哪個路徑），只留 90 天，`main.py` 背景 task 每天清理 |
-| `access_tickets` | 一次性查詢 ticket（只存 hash，60 秒過期、用過即廢）。**刻意不存 access token**——跟 Azure AD 換 token 是在兌換當下才做 |
+| `access_tickets` | 一次性查詢 ticket（只存 hash，短效、用過即廢）。**刻意不存 access token**——跟 Azure AD 換 token 是在兌換當下才做 |
 
 ## Docker 部署
 

@@ -96,6 +96,22 @@ def test_redeem_invalid_ticket(client):
     assert res.status_code == 401
 
 
+def test_ticket_ttl_is_configurable_and_falls_back(monkeypatch):
+    """TTL 由 MCP_TICKET_TTL_SECONDS 控制。非法值不能讓 ticket 變成永久有效或立刻過期，
+    一律回退到預設值。"""
+    from app.routers.ticket import DEFAULT_TICKET_TTL_SECONDS, ticket_ttl_seconds
+
+    monkeypatch.delenv("MCP_TICKET_TTL_SECONDS", raising=False)
+    assert ticket_ttl_seconds() == DEFAULT_TICKET_TTL_SECONDS
+
+    monkeypatch.setenv("MCP_TICKET_TTL_SECONDS", "90")
+    assert ticket_ttl_seconds() == 90
+
+    for bad in ("abc", "", "0", "-5"):
+        monkeypatch.setenv("MCP_TICKET_TTL_SECONDS", bad)
+        assert ticket_ttl_seconds() == DEFAULT_TICKET_TTL_SECONDS
+
+
 @pytest.mark.anyio
 async def test_redeem_expired_ticket(
     live_server, client, admin_token, mcp_access_token, fake_azure,

@@ -157,14 +157,20 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
 {
   "ticket": "隨機亂數字串（不含任何語意）",
   "redeem_url": "https://<SITE_DOMAIN>/api/ticket/redeem",
-  "expires_in": 60
+  "expires_in": 300
 }
 ```
 
 **ticket 的性質**：
 - **單次使用**——兌換過就失效，不能重複用
-- **60 秒過期**——每次要執行查詢前重新呼叫這支 tool 拿新的即可
+- **會過期**——效期見回傳的 `expires_in`（預設 300 秒，由 server 端的 `MCP_TICKET_TTL_SECONDS` 決定，不要寫死）
 - **不含任何語意**——純隨機字串，「是誰、哪個 `pbi_config_id`」全部存在 server 端，DB 也只存 hash
+
+> ⏱ **請在真正要執行查詢的前一刻才呼叫這支 tool。** 所有澄清、選項確認、DAX 生成都完成之後再拿 ticket——中間若還要跟使用者來回確認，等回來時它可能已經過期。
+>
+> 要注意的是，**這段延遲不只來自 AI 主動提問**：Claude Code／Claude Desktop 執行 Bash 前常常需要使用者按下權限確認，那段等待完全落在「拿到 ticket」與「腳本兌換」之間，而且不是 Skill 能控制的。所以除了把 `get_query_ticket` 放到最後一刻，**也一定要實作下面的重試**。
+>
+> **過期就重拿**：腳本兌換時若收到 `401`「ticket 已過期，請重新取得」，直接重新呼叫 `get_query_ticket` 拿一張新的再跑一次即可。這很便宜、沒有副作用，也是使用者中途離開時唯一的救援路徑。
 
 **失敗情況**（皆為 tool error，訊息會說明原因）：
 - 使用者沒有該 `pbi_config_id` 的存取權
@@ -212,7 +218,7 @@ Claude ──────>  execute_dax_query.py <ticket> <workspace_id> <datase
 
 - ❌ **不要**把 token 寫進檔案（`.access_token` 這類做法要移除）——`Write` 工具的內容會完整進上下文，而且檔案會留在使用者的專案資料夾裡，有被 git commit／備份／同步出去的風險
 - ❌ **不要**把 token 當成 command-line 參數傳——指令列一樣會進上下文
-- ✅ ticket 當 argv 傳沒問題（60 秒、單次使用，就算外流價值也極低）
+- ✅ ticket 當 argv 傳沒問題（短效、單次使用，就算外流價值也極低）
 - ✅ 同一次腳本執行內要連續查好幾次的話，兌換一次、在記憶體裡重複用即可
 
 **Token 快取指引已反轉**：舊版指引要求「同一個對話內快取 token、不要每次查詢都呼叫 tool」。改用 ticket 之後**相反**——ticket 是單次使用的，**每次要執行查詢前都要重新呼叫 `get_query_ticket` 拿新的**，不需要也不應該快取。

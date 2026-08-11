@@ -11,7 +11,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from app.access_log import get_mcp_request_context, record_access
 from app.database import SessionLocal
 from app.models import AccessTicket, ModelChunk, PbiConfig, PersonalAccessToken, User, UserPbiConfig
-from app.routers.ticket import TICKET_TTL_SECONDS
+from app.routers.ticket import ticket_ttl_seconds
 from app.security import generate_access_ticket, hash_opaque_token, verify_mcp_access_token
 
 
@@ -255,9 +255,16 @@ def get_mcp_server() -> FastMCP:
         POST 到 redeem_url（body: {"ticket": "..."}）換取真正的 access token 後直接
         呼叫 Power BI executeQueries API。
 
+        **請在真正要執行查詢的前一刻才呼叫這個 tool**：所有澄清、選項確認、DAX 生成
+        都完成之後再拿 ticket。ticket 會過期，中間若還要跟使用者來回確認，等回來時
+        它可能已經失效了。
+
         **不要把 ticket 或換到的 token 寫進檔案、也不要顯示給使用者**——真正的 token
-        只應該存在於查詢腳本的行程記憶體裡。每次要執行查詢前重新呼叫這個 tool 拿新的
-        ticket 即可（ticket 用過就失效，不能重複使用，也不需要快取）。
+        只應該存在於查詢腳本的行程記憶體裡。ticket 用過就失效，不需要也不應該快取；
+        每次要執行查詢就重新呼叫這個 tool 拿一張新的。
+
+        如果腳本兌換時收到「ticket 已過期」，直接重新呼叫這個 tool 拿新的再跑一次即可，
+        這沒有任何副作用。
 
         workspace_id/dataset_id 請從 get_model_detail 取得，這裡不重複回傳。
         """
@@ -270,19 +277,20 @@ def get_mcp_server() -> FastMCP:
             if not user.tenant_id or not user.client_id or not user.client_secret_enc:
                 raise ToolError("Azure AD 憑證尚未設定，請聯絡管理員")
 
+            ttl = ticket_ttl_seconds()
             raw_ticket = generate_access_ticket()
             db.add(AccessTicket(
                 token_hash=hash_opaque_token(raw_ticket),
                 user_id=user.id,
                 pbi_config_id=pbi_config_id,
-                expires_at=datetime.utcnow() + timedelta(seconds=TICKET_TTL_SECONDS),
+                expires_at=datetime.utcnow() + timedelta(seconds=ttl),
             ))
             db.commit()
 
         return {
             "ticket": raw_ticket,
             "redeem_url": f"{_issuer()}/api/ticket/redeem",
-            "expires_in": TICKET_TTL_SECONDS,
+            "expires_in": ttl,
         }
 
     _mcp_server = server
