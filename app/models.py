@@ -109,6 +109,27 @@ class PersonalAccessToken(Base):
     last_used_at = Column(DateTime, nullable=True)
 
 
+class AccessTicket(Base):
+    """一次性短效 ticket，用來取代「直接把 Power BI access token 當成 MCP tool 回傳值」。
+
+    原本 `get_powerbi_token` 直接回傳 access token，實測會讓 token 進入對話上下文
+    （tool 回傳值本身、以及 client 端把它 Write 成檔案時都會完整出現），等於一小時
+    有效的憑證留在對話紀錄裡。改成先發一張不含任何語意的隨機 ticket，由呼叫端的
+    查詢腳本自己去 `/api/ticket/redeem` 兌換，真 token 就只存在於該行程的記憶體。
+
+    刻意**不存 access token 本身**：跟 Azure AD 換 token 是在 redeem 當下才做，
+    所以這張表任何時候都不會有可直接使用的憑證。明文 ticket 一樣只存 hash
+    （比照 PBI_MASK_KEY／OAuth refresh token／PAT 的既有做法）。"""
+    __tablename__ = "access_tickets"
+
+    token_hash = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    pbi_config_id = Column(String, ForeignKey("pbi_config.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    used_at = Column(DateTime, nullable=True)
+
+
 class AccessLog(Base):
     """使用者存取歷史，供管理員在 /admin/access-logs 查詢／匯出。只留 90 天（見 main.py
     的背景清理 task），user_id 允許為 null、email 額外存一份純文字快照，這樣使用者

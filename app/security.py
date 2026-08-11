@@ -64,6 +64,11 @@ def generate_personal_access_token() -> str:
     return "pat_" + secrets.token_hex(32)
 
 
+def generate_access_ticket() -> str:
+    """一次性短效 ticket：純隨機、不含任何語意（誰／哪個設定全部存在 DB 那一列）。"""
+    return secrets.token_urlsafe(32)
+
+
 def issue_credential_jwt(payload: dict, expires_at: datetime | None = None) -> str:
     expire = expires_at or datetime.now(timezone.utc) + timedelta(days=30)
     data = {

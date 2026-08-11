@@ -38,14 +38,17 @@ Vue 3 SPA (same origin)
 |---|---|
 | `list_models` | Lightweight list of the user's accessible models (id, name, description, table count, available query modes) |
 | `get_model_detail` | Full relationships + tables structure, with workspace/dataset IDs, filter rules, and column-value aliases; an optional `mode_id` scopes `tables` to a data-exposure "query mode" and merges its filters in |
-| `get_powerbi_token` | Issues a Power BI access token; the client executes DAX queries against the Power BI executeQueries API directly — the server does not proxy queries |
+| `get_query_ticket` | Issues a single-use, 60-second **ticket** — deliberately *not* an access token. The caller's query script redeems it at `POST /api/ticket/redeem` for the real token, so the token never enters the conversation transcript. Queries still run client-side against the Power BI executeQueries API — the server does not proxy queries |
 
-Token issuance calls Azure AD (MSAL) synchronously, so it runs in a worker thread (`anyio.to_thread.run_sync`) to keep the event loop responsive — a redesign after an earlier version that executed queries server-side and degraded under concurrency.
+**Why a ticket instead of the token**: returning the access token from an MCP tool put a live one-hour Power BI credential into the conversation context (both in the tool result and again whenever the client wrote it to a file). The ticket carries no meaning of its own — who and which config live server-side, and only its hash is stored — so the real token exists solely in the query script's process memory.
+
+The Azure AD (MSAL) exchange happens at redeem time on a regular FastAPI endpoint, which FastAPI already runs in a worker thread — a redesign after an earlier version that executed queries server-side and degraded under concurrency.
 
 ## Security design
 
 - Per-user Azure AD Service Principal credentials; Client Secrets stored with **AES-256-GCM** encryption and **never sent to any client** — the server performs the token exchange itself
 - `PBI_MASK_KEY` and all long-lived tokens stored as hashes only; plaintext shown exactly once
+- Power BI access tokens are never returned through MCP and never stored — they're handed out only via a single-use 60-second ticket redeemed by the client's query script, keeping live credentials out of conversation transcripts and off disk
 - Separate JWT scopes and lifetimes (user 8 h / admin 1 h); optional IP allow-list
 - Login lockout after 5 failed attempts (admin-unlockable)
 - **Caddy** TLS termination with automatic Let's Encrypt certificates; only 80/443 exposed, the app container is never directly reachable

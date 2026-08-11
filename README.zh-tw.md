@@ -142,11 +142,19 @@ Access token 是 1 小時效期的 JWT；refresh token 90 天效期、每次使�
 |------|------|------|
 | `list_models` | 無 | 列出使用者可存取的模型（輕量版：id、名稱、說明、表數量、`query_modes`） |
 | `get_model_detail` | `pbi_config_id`、`mode_id`（選填） | 取得完整 relationships + tables 結構，含 `workspace_id`/`dataset_id`/`filters`/`column_aliases`。帶 `mode_id` 時只回該「資料曝光範圍模式」設定的表，且該模式的篩選規則會疊加成一筆 `alwaysApply` filter profile；不帶時行為與加這個功能前完全一樣 |
-| `get_powerbi_token` | `pbi_config_id` | 核發該設定的 Power BI access token（`access_token`/`token_type`/`expires_in`），**查詢由呼叫端自己直接打 Power BI executeQueries API 執行**，server 不代理查詢本身 |
+| `get_query_ticket` | `pbi_config_id` | 核發一次性 ticket（`ticket`/`redeem_url`/`expires_in`，60 秒、單次使用）。**不直接回傳 access token**——呼叫端的查詢腳本自己拿 ticket 打 `POST /api/ticket/redeem` 換 token，避免 token 進入對話上下文。**查詢一樣由呼叫端自己直接打 Power BI executeQueries API 執行**，server 不代理查詢本身 |
 
-`get_powerbi_token` 內部同步呼叫 Azure AD（MSAL），用 `anyio.to_thread.run_sync` 丟到背景執行緒執行，避免併發請求時卡住 event loop（早期版本 `run_dax_query` 直接在 server 端執行查詢＋同步阻塞呼叫，並發量大時會拖垮整個服務，已改為現在這個設計）。
+跟 Azure AD 換 token（MSAL 同步阻塞呼叫）發生在 `POST /api/ticket/redeem`，那是一般 FastAPI 端點、自動跑在 thread pool，不會卡住 event loop。`get_query_ticket` 本身只寫一列 DB，不打任何外部網路。（早期版本 `run_dax_query` 直接在 server 端執行查詢＋同步阻塞呼叫，並發量大時會拖垮整個服務，已改為現在這個設計。）
 
 `/mcp` 的 Bearer token 接受兩種：OAuth 核發的 access token（見上方），或使用者自己在 `/mcp-tokens` 產生的 Personal Access Token（`pat_` 開頭，無到期時間，撤銷前一直有效）。後者是給不會自動走 OAuth 流程、需要手動貼上固定 token 的 MCP client 用，詳見 [docs/skill-integration.md](docs/skill-integration.md)。
+
+### Ticket 兌換（`/api/ticket/*`）— 給 Skill 的查詢腳本用
+
+| 方法 | 路徑 | 驗證 | 說明 |
+|------|------|------|------|
+| POST | `/api/ticket/redeem` | ticket 本身 | 用 `get_query_ticket` 發的一次性 ticket 換 Power BI access token（`access_token`/`token_type`/`expires_in`） |
+
+不需要其他身份驗證——ticket 就是憑證（單次使用、60 秒過期、DB 只存 hash）。這條路徑在 `main.py` 列為 IP 白名單豁免，因為它是給使用者機器／沙盒上的腳本呼叫的，不可能在內網。設計動機與 Skill 端改法見 [docs/skill-integration.md](docs/skill-integration.md)。
 
 ### 使用者 API（`/auth/*`）
 
@@ -230,6 +238,7 @@ python scripts/chunk_model.py path/to/model.json
 | `oauth_refresh_tokens` | 長效 refresh token（只存 hash，90 天效期，每次使用輪換） |
 | `personal_access_tokens` | MCP Personal Access Token（只存 hash，無到期時間，給不支援 OAuth 的 MCP client 用） |
 | `access_logs` | 使用者存取歷史（誰、何時、用哪種方式、打了哪個路徑），只留 90 天，`main.py` 背景 task 每天清理 |
+| `access_tickets` | 一次性查詢 ticket（只存 hash，60 秒過期、用過即廢）。**刻意不存 access token**——跟 Azure AD 換 token 是在兌換當下才做 |
 
 ## Docker 部署
 

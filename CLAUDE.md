@@ -35,14 +35,16 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 - `datetime.now(timezone.utc)`：JWT 時間戳**必須**用這個，`utcnow()` 在 UTC+8 環境會讓 exp 提前 7 小時失效。
 - `client_secret` 以 AES-256-GCM 加密存 DB，key 衍生自 `SERVER_JWT_SECRET`。
 - PBI_MASK_KEY 明文只在產生時回傳一次，DB 只存 SHA-256 hash；OAuth refresh token、MCP Personal Access Token（`personal_access_tokens` 表）比照辦理，只存 hash。`mcp.py` 的 `_JwtTokenVerifier` 驗證時先試 OAuth JWT，失敗再退回查 PAT hash——兩種 token 都能通過 `/mcp` 的身份驗證。
-- MCP tool（`get_powerbi_token`）只負責在 server 端跟 Azure AD 換 token，**查詢本身由呼叫端拿 token 直接打 Power BI executeQueries**，server 不代理查詢——這是刻意設計，早期版本讓 server 代跑查詢，同步阻塞的網路呼叫在並發時會卡住整個 event loop（MCP tool 沒有 FastAPI 那種自動 thread pool offload）。`get_powerbi_token` 內部用 `anyio.to_thread.run_sync` 包住 MSAL 呼叫，避免同樣問題。
+- **查詢本身由呼叫端直接打 Power BI executeQueries**，server 不代理查詢——這是刻意設計，早期版本讓 server 代跑查詢，同步阻塞的網路呼叫在並發時會卡住整個 event loop（MCP tool 沒有 FastAPI 那種自動 thread pool offload）。
+- MCP tool **不回傳 access token，只回傳一次性 ticket**（`get_query_ticket`，60 秒、單次使用、`access_tickets` 表只存 hash），由呼叫端的查詢腳本自己打 `POST /api/ticket/redeem` 兌換。動機是實測發現舊的 `get_powerbi_token` 會讓有效一小時的 Power BI 憑證完整進入對話上下文——tool 回傳值本身記一次，client 端把它 `Write` 成檔案時再記一次，而且還會落地到使用者的專案資料夾。**`access_tickets` 刻意不存 access token**：跟 Azure AD 換 token 是在 redeem 當下才做，所以那張表任何時候都不含可直接使用的憑證。MSAL 那個同步阻塞呼叫移到 redeem 端點後也不再需要 `anyio.to_thread.run_sync`——一般 FastAPI 端點本來就跑在 thread pool。
+- `/api/ticket/` 必須列在 `main.py` 的 `_IP_WHITELIST_EXEMPT_PREFIXES`：那是給使用者機器／沙盒上的腳本呼叫的，不可能在內網，安全性靠 ticket 本身而不是 IP。另外 skill 端的沙盒除了 `api.powerbi.com` 之外，還要把 `SITE_DOMAIN` 加進 Claude 的 network egress 白名單才能兌換（見 `docs/skill-integration.md`）。
 - `acquire_powerbi_token()`（`credential.py`）每次呼叫都重建 `ConfidentialClientApplication`，MSAL 內建的 token cache 因此沒作用；已知但暫緩優化，見函式內 TODO 註記。
 - OAuth client 一律走 Dynamic Client Registration + PKCE（public client，不核發 client_secret）。
 - `/auth/login`、`/oauth/authorize` 的登入共用 `security.authenticate_user()`，累積 5 次密碼錯誤鎖定帳號（`User.failed_login_attempts`），只能由管理員在 `/admin/users` 解鎖，沒有自動過期解鎖。兩個入口共用同一組計數，其中一邊被鎖另一邊也會被鎖。
 - `PbiConfig.filters` 是管理員在 `/admin/pbi-configs` 維護的篩選規則（JSON 陣列），透過 `get_model_detail` 交給 skill 端，取代原本 skill 本機 `filters/*.json` 的設計，格式與比對邏輯見 `docs/skill-integration.md`。
 - 裸路徑 `/mcp`（沒有尾斜線）**不能**用 HTTP 307 轉址到 `/mcp/` 處理——部分 MCP client（例如 Gemini）跟隨轉址重新發送請求時不會保留 `Authorization` header，會導致認證失敗。`main.py` 的 `_McpTrailingSlashFix` 改成在 ASGI 層、Starlette Router 判斷路由之前，直接把路徑內部改寫成 `/mcp/`，同一個請求處理完，client 端完全不會看到任何轉址；這個 wrapper 必須包住整個 `app`（不能只包 `/mcp` 掛載的 sub-app），因為 Router 判斷要不要進到 Mount 這一步，發生在 sub-app 被呼叫之前。
 - 存取歷史（`access_logs` 表）在三個既有身份驗證點各自補一行寫入（`auth.py` 的 `_require_user`、`mcp.py` 的 `_JwtTokenVerifier`、`credential.py` 的 `_resolve_user`），共用 `app/access_log.py` 的 `record_access()`，只記錄驗證成功的請求。只留 90 天，`main.py` 的 lifespan 開一個背景 task 每天清一次舊資料，沒有另外掛排程服務。
-- `mcp.py` 的存取紀錄分兩層：`_JwtTokenVerifier` 每個 HTTP request 都記一筆通用的 `path="/mcp"`（含 `initialize`/`list_tools` 這些協定層呼叫，用來看背景連線活動）；`_log_tool_access()` 額外在 `list_models`/`get_model_detail`/`get_powerbi_token` 三個 tool 各自呼叫，記一筆 `path="/mcp/{tool_name}"`，才看得出「哪個使用者觸發了哪個功能」。同一次真正的 tool 呼叫因此會有兩筆紀錄，這是刻意的（各自用途不同），不是重複寫入的 bug。
+- `mcp.py` 的存取紀錄分兩層：`_JwtTokenVerifier` 每個 HTTP request 都記一筆通用的 `path="/mcp"`（含 `initialize`/`list_tools` 這些協定層呼叫，用來看背景連線活動）；`_log_tool_access()` 額外在 `list_models`/`get_model_detail`/`get_query_ticket` 三個 tool 各自呼叫，記一筆 `path="/mcp/{tool_name}"`，才看得出「哪個使用者觸發了哪個功能」。同一次真正的 tool 呼叫因此會有兩筆紀錄，這是刻意的（各自用途不同），不是重複寫入的 bug。
 - `/mcp` 的驗證點（`TokenVerifier.verify_token()`）介面只給 token 字串、拿不到 `Request` 物件，IP／HTTP method 要記錄下來得靠 `main.py` 的 `_McpTrailingSlashFix`（ASGI 層，比 FastAPI 的 Request 更早）從原始 scope 讀出來、存進 `app/access_log.py` 的 contextvar，`_JwtTokenVerifier` 再讀出來寫進 log。這個 contextvar 是 per-task 的，並發請求之間不會互相污染。
 - `PbiConfig.query_modes`（資料曝光範圍模式）跟 `filters` 是兩個獨立機制、疊加而非取代：`get_model_detail` 帶 `mode_id` 時只把該模式的 `filters` 包成一筆 `alwaysApply=true` 的 filter profile 塞進既有 `filters` 陣列尾端，skill 端原本的比對邏輯完全不用改；`mode.tables` 為空代表不限制表範圍（不是「全部不給看」）。存取限制沿用既有的 `UserPbiConfig` 指派機制，沒有另外做使用者-模式層級的授權——同一份資料要給不同部門看不同範圍，作法是管理員建立多個 `PbiConfig`（各自定義相關 `query_modes`）分別指派，不是同一個設定裡限制特定使用者只能用某些模式。
 - `PbiConfig.column_aliases`（重點欄位別名）不受 `mode_id` 影響，`get_model_detail` 固定整包回傳；跟 `filters` 是完全不同的機制——`filters` 是關鍵字比對後注入整段 DAX 布林運算式，`column_aliases` 是「欄位＋值＋同義詞」的對照表，給 skill 在生成 DAX 前把使用者的自然語言用詞（例如「北部」）轉換成 Power BI 實際存的欄位值（例如 `"North"`）。
@@ -89,14 +91,15 @@ app/
   main.py          FastAPI 入口（CORS、SPA static、MCP mount + lifespan、access_logs 每日清理 task）
   security.py      JWT、密碼、AES、PKCE 驗證、MCP token 簽發
   access_log.py    存取歷史寫入共用邏輯（record_access），三個身份驗證點都呼叫這裡
-  models.py        SQLAlchemy ORM（含 OAuth 三張表 + personal_access_tokens + access_logs）
+  models.py        SQLAlchemy ORM（含 OAuth 三張表 + personal_access_tokens + access_logs + access_tickets）
   database.py      SQLAlchemy 設定
   routers/
     auth.py        /auth（使用者，含 /auth/mcp-tokens 自助 PAT CRUD）
-    credential.py  /api（Skill legacy），也提供 acquire_powerbi_token 給 MCP 用
+    credential.py  /api（Skill legacy），也提供 acquire_powerbi_token 給 ticket redeem 用
     admin.py       /api/admin（管理員）
     oauth.py       /oauth、/.well-known（OAuth 2.1 authorization server）
-    mcp.py         /mcp（MCP server + tools：list_models/get_model_detail(mode_id?)/get_powerbi_token）
+    mcp.py         /mcp（MCP server + tools：list_models/get_model_detail(mode_id?)/get_query_ticket）
+    ticket.py      /api/ticket/redeem（一次性 ticket 換 Power BI access token，給 skill 腳本呼叫）
 admin-frontend/    Vue 3 SPA（Element Plus + Pinia）
 scripts/
   chunk_model.py   離線工具：將原始 PBI JSON 拆分成 relationships + tables

@@ -98,7 +98,7 @@ def mcp_access_token(client, admin_token, active_user, oauth_client):
     完整跑一次 OAuth flow 拿到 MCP access token，並先透過 admin API 建一個
     PBI 設定、指派給測試使用者、上傳一份簡化語意模型，回傳 (access_token, pbi_config_id, user_id)。
     注意：這個 fixture 刻意不設定 Azure AD 憑證（tenant_id/client_id/client_secret），
-    測 get_powerbi_token 的成功路徑時，測試自己要另外用 user_id 呼叫
+    測 get_query_ticket／ticket redeem 的成功路徑時，測試自己要另外用 user_id 呼叫
     PATCH /api/admin/users/{user_id}/credentials 補上。
     """
     email, password = active_user

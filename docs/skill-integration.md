@@ -142,17 +142,47 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
 
 **`column_aliases` 的使用方式**：這不受 `mode_id` 影響，固定回傳整個 PBI 設定的欄位別名對照。生成 DAX 前，先掃描使用者的需求文字，如果提到某個 `aliases` 裡的詞（例如「北部」），比對邏輯上就把它當成對應的 `value`（例如 `"North"`）寫進 DAX 篩選條件，而不是直接把使用者的原始用詞當成欄位值——這樣可以避免 DAX 因為值不存在資料裡而查不到結果。沒有比對到任何別名時，正常使用使用者的原始用詞即可。
 
-### `get_powerbi_token`
+### `get_query_ticket`
 
-取得指定 PBI 設定的 Power BI access token（server 端用使用者的 Azure AD 憑證去跟 Azure AD 換）。
+> 🔴 **Breaking change（2026-08）**：這支 tool 取代了原本的 `get_powerbi_token`。舊的 tool 已移除，呼叫它會得到 unknown tool 錯誤。Skill 端必須配合修改，見下方「Skill 端要怎麼改」。
 
-> ⚠️ **這支 tool 不執行查詢**。查詢是 Skill 自己拿這個 token 直接對 Power BI 的 `executeQueries` REST API 發請求——這是刻意的設計，不是漏做：如果讓 server 代為執行查詢並等待/轉發結果，並發多個查詢時會讓 server 端的同步網路呼叫互相卡住（甚至拖垮整個服務的回應能力，包含跟這次查詢完全無關的其他使用者）。查詢執行放回 Skill 端執行對雙方都更安全、更好擴充。
->
-> **前提：使用者的 Claude 執行環境要放行 `api.powerbi.com`**。Claude Apps 的 code execution 沙盒（以及 Claude Desktop 的 local agent mode）預設會擋未知網域的對外連線，需要使用者自行到 Claude Settings → Capabilities → Network egress 把 `api.powerbi.com` 加入白名單，否則 Skill 執行 `executeQueries` 時會收到類似 `Tunnel connection failed: 403 Forbidden` 的錯誤（但 `get_powerbi_token` 這支 tool 本身仍會成功，因為那是走 MCP 連線，不受這個沙盒網路限制影響）。這個設定步驟請寫進 Skill 自己的安裝教學。
+取得執行 DAX 查詢用的**一次性 ticket**。這支 tool **不再直接回傳 access token**。
+
+**為什麼要改**：實測發現舊設計會讓 access token 完整進入對話上下文——tool 回傳值本身就會被記錄，而且 Skill 若把 token 寫成檔案（`Write` 工具），token 又會在工具呼叫裡再出現一次。等於一個有效一小時的 Power BI 憑證留在對話紀錄裡，對話被匯出、共享或存進第三方時就會外流。改成發 ticket 之後，真正的 token 只存在於查詢腳本的行程記憶體，不會進上下文、也不落地。
 
 **輸入**：`pbi_config_id: str`
 
 **輸出**：`dict`
+```json
+{
+  "ticket": "隨機亂數字串（不含任何語意）",
+  "redeem_url": "https://<SITE_DOMAIN>/api/ticket/redeem",
+  "expires_in": 60
+}
+```
+
+**ticket 的性質**：
+- **單次使用**——兌換過就失效，不能重複用
+- **60 秒過期**——每次要執行查詢前重新呼叫這支 tool 拿新的即可
+- **不含任何語意**——純隨機字串，「是誰、哪個 `pbi_config_id`」全部存在 server 端，DB 也只存 hash
+
+**失敗情況**（皆為 tool error，訊息會說明原因）：
+- 使用者沒有該 `pbi_config_id` 的存取權
+- 使用者的 Azure AD 憑證尚未由管理員設定（刻意在發 ticket 這一步就擋，而不是等到兌換才失敗）
+
+### `POST /api/ticket/redeem`（一般 HTTP，不是 MCP tool）
+
+由 **Skill 的查詢腳本自己呼叫**，用 ticket 換真正的 access token。
+
+**Request**
+```
+POST https://<SITE_DOMAIN>/api/ticket/redeem
+Content-Type: application/json
+
+{ "ticket": "<剛剛拿到的 ticket>" }
+```
+
+**Response 200**
 ```json
 {
   "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9...",
@@ -162,12 +192,32 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
 ```
 （不含 `workspace_id`/`dataset_id`，那兩個從 `get_model_detail` 拿，避免重複回傳同一份靜態資料。）
 
-**失敗情況**（皆為 tool error，訊息會說明原因）：
-- 使用者沒有該 `pbi_config_id` 的存取權
-- 使用者的 Azure AD 憑證尚未由管理員設定（`tenant_id`/`client_id`/`client_secret` 任一缺失）
-- Azure AD 驗證失敗（憑證錯誤、租戶設定問題等）
+這支端點不需要其他身份驗證——ticket 本身就是憑證。失敗一律回 `401`（無效／已使用／已過期）或 `403`（帳號已停用或憑證過期）。
 
-**拿到 `access_token` 之後，Skill 自己直接打**：
+### Skill 端要怎麼改
+
+**關鍵原則：ticket 可以進上下文，token 不行。** 所以兌換動作一定要發生在**腳本內部**，不能由 Claude 拿到 token 之後再傳給腳本——那樣 token 就又回到上下文裡了。
+
+```
+Claude ──MCP──> get_query_ticket(pbi_config_id)  →  { ticket, redeem_url, expires_in }
+Claude ──────>  execute_dax_query.py <ticket> <workspace_id> <dataset_id> <dax檔> <輸出檔>
+                        │
+                        ├─ ① POST {redeem_url}  {"ticket": ...}   →  access_token（只在記憶體）
+                        └─ ② POST api.powerbi.com/.../executeQueries  用 ① 的 token
+                        
+                        腳本只回傳查詢結果，token 從頭到尾不外流
+```
+
+必須做到：
+
+- ❌ **不要**把 token 寫進檔案（`.access_token` 這類做法要移除）——`Write` 工具的內容會完整進上下文，而且檔案會留在使用者的專案資料夾裡，有被 git commit／備份／同步出去的風險
+- ❌ **不要**把 token 當成 command-line 參數傳——指令列一樣會進上下文
+- ✅ ticket 當 argv 傳沒問題（60 秒、單次使用，就算外流價值也極低）
+- ✅ 同一次腳本執行內要連續查好幾次的話，兌換一次、在記憶體裡重複用即可
+
+**Token 快取指引已反轉**：舊版指引要求「同一個對話內快取 token、不要每次查詢都呼叫 tool」。改用 ticket 之後**相反**——ticket 是單次使用的，**每次要執行查詢前都要重新呼叫 `get_query_ticket` 拿新的**，不需要也不應該快取。
+
+**拿到 `access_token` 之後，腳本自己直接打**：
 ```
 POST https://api.powerbi.com/v1.0/myorg/groups/{workspace_id}/datasets/{dataset_id}/executeQueries
 Authorization: Bearer <access_token>
@@ -179,7 +229,13 @@ Content-Type: application/json
 }
 ```
 
-**Token 快取（重要，請務必實作）**：`access_token` 效期是 `expires_in` 秒（通常 3600）。Skill 應該在**同一個對話內**快取這個 token（記下拿到的時間 + `expires_in`，算出過期時間點，建議預留 1-2 分鐘安全邊界），同一個對話要連續查好幾次 DAX 時直接重複使用，**不要每次查詢前都呼叫一次 `get_powerbi_token`**。這個快取只能活在對話上下文裡，**不可以寫回本機檔案跨對話持久化**——那樣就繞回我們一開始要解決的 sandbox 憑證消失問題了。
+> ⚠️ **這支 tool 不執行查詢**。查詢是 Skill 自己直接對 Power BI 的 `executeQueries` REST API 發請求——這是刻意的設計，不是漏做：如果讓 server 代為執行查詢並等待/轉發結果，並發多個查詢時會讓 server 端的同步網路呼叫互相卡住（甚至拖垮整個服務的回應能力，包含跟這次查詢完全無關的其他使用者）。
+>
+> **前提：使用者的 Claude 執行環境要放行兩個網域**。Claude Apps 的 code execution 沙盒（以及 Claude Desktop 的 local agent mode）預設會擋未知網域的對外連線，需要使用者自行到 Claude Settings → Capabilities → Network egress 加入白名單：
+> - `api.powerbi.com`（執行 DAX 查詢）
+> - `<SITE_DOMAIN>`（兌換 ticket）← **改用 ticket 後新增的需求**
+>
+> 漏掉的症狀是類似 `Tunnel connection failed: 403 Forbidden` 的錯誤，而且 MCP tool 本身仍會成功（那是走 MCP 連線，不受沙盒網路限制影響），很容易誤判成憑證問題。這兩項請寫進 Skill 的安裝教學。
 
 ---
 
@@ -203,18 +259,20 @@ Content-Type: application/json
 Skill 依現有推理邏輯（辨識資料表 → 驗證關聯 → 抽欄位/量值 → 套用篩選集 → 生成 DAX）產出 DAX 查詢
        │
        ▼
-手上有沒有還沒過期的 token？
-       ├─ 有 → 直接沿用
-       └─ 沒有/過期了 → 呼叫 get_powerbi_token(pbi_config_id) 拿新的
+呼叫 get_query_ticket(pbi_config_id) 拿一張 ticket（每次查詢都要重拿，不要快取）
        │
        ▼
-Skill 自己直接對 Power BI executeQueries API 發送 DAX 查詢（不經過我們的 server）
+把 ticket 交給查詢腳本，腳本內部：
+       ├─ ① POST {redeem_url} 用 ticket 換 access_token（只存在記憶體）
+       └─ ② 直接對 Power BI executeQueries API 發送 DAX 查詢（不經過我們的 server）
        │
        ▼
-Power BI 直接把查詢結果回給 Skill，拿到結構化查詢結果列，呈現給使用者
+Power BI 直接把查詢結果回給腳本，腳本只輸出結果（token 不外流），呈現給使用者
 ```
 
-跟 legacy 流程相比，**Skill 完全不需要碰觸 PBI_MASK_KEY**（那個概念在 MCP 流程裡整個消失），也不需要寫任何本機檔案（`pbi_query/dax_query.txt`、`query_result.csv` 這類本機快取檔可以整個拿掉，除非你想保留「結果落地到使用者專案資料夾」這個體驗，那就是 Skill 自己用 Write 工具把查詢結果寫成檔案）。跟 legacy 流程一樣，**Azure AD access token 由 Skill 自己拿去直接呼叫 Power BI**——這點兩邊其實相同，MCP 版只是把「怎麼拿到這個 token」從 PBI_MASK_KEY 換成 OAuth。
+跟 legacy 流程相比，**Skill 完全不需要碰觸 PBI_MASK_KEY**（那個概念在 MCP 流程裡整個消失），也不需要寫任何本機檔案（`pbi_query/dax_query.txt`、`query_result.csv` 這類本機快取檔可以整個拿掉，除非你想保留「結果落地到使用者專案資料夾」這個體驗，那就是 Skill 自己用 Write 工具把查詢結果寫成檔案）。**唯一絕對不能落地的是 access token**——見上方「Skill 端要怎麼改」。
+
+兩邊相同的是：**Azure AD access token 最終都是由 Skill 自己拿去直接呼叫 Power BI**，我們的 server 從不代理查詢。差別只在「怎麼拿到這個 token」——legacy 是 PBI_MASK_KEY 換，MCP 版是 OAuth 連線 + 一次性 ticket 兌換。
 
 ---
 

@@ -12,8 +12,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
 from app.access_log import set_mcp_request_context
 from app.database import engine, Base, SessionLocal
-from app.models import AccessLog
-from app.routers import auth, credential, admin, oauth
+from app.models import AccessLog, AccessTicket
+from app.routers import auth, credential, admin, oauth, ticket
 from app.routers import mcp as mcp_router
 
 _raw_ips = os.getenv("ALLOWED_IPS", "")
@@ -115,10 +115,14 @@ ACCESS_LOG_RETENTION_DAYS = 90
 
 async def _cleanup_access_logs_loop():
     # 存取歷史只留 90 天，沒有另外掛排程服務，開一個背景 task 每天跑一次清舊資料。
+    # 順便清掉已經過期的一次性 ticket（過期後就算沒被用過也不可能再兌換，留著只是佔空間）。
     while True:
         cutoff = datetime.utcnow() - timedelta(days=ACCESS_LOG_RETENTION_DAYS)
         with SessionLocal() as db:
             db.query(AccessLog).filter(AccessLog.created_at < cutoff).delete(synchronize_session=False)
+            db.query(AccessTicket).filter(AccessTicket.expires_at < datetime.utcnow()).delete(
+                synchronize_session=False
+            )
             db.commit()
         await asyncio.sleep(24 * 60 * 60)
 
@@ -137,7 +141,9 @@ app = FastAPI(title="PBI Credential 申請程式", version="0.1.0", lifespan=lif
 # OAuth/MCP 這幾條路徑本來就要給不特定第三方（使用者的瀏覽器、Claude 的伺服器）連，
 # 不可能限制在內網——安全性靠 OAuth 本身（PKCE + 登入 + 同意畫面）把關，不是靠 IP。
 # 其餘路徑（含 /admin/*、/auth/*）維持原本「僅限內網」的設計，不在這個排除清單內。
-_IP_WHITELIST_EXEMPT_PREFIXES = ("/oauth/", "/.well-known/", "/mcp")
+# /api/ticket/ 也要豁免：那是給使用者機器／沙盒上的查詢腳本呼叫的，不可能在內網。
+# 安全性靠 ticket 本身（單次使用、60 秒過期、只存 hash），不是靠 IP。
+_IP_WHITELIST_EXEMPT_PREFIXES = ("/oauth/", "/.well-known/", "/mcp", "/api/ticket/")
 
 
 @app.middleware("http")
@@ -166,6 +172,7 @@ app.include_router(auth.router)
 app.include_router(credential.router)
 app.include_router(admin.router)
 app.include_router(oauth.router)
+app.include_router(ticket.router)
 
 
 app.mount("/mcp", _mcp_server.streamable_http_app())
