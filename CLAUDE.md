@@ -53,6 +53,28 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 - `admin.py` 的 `PATCH /pbi-configs/batch-update` **必須**註冊在 `PATCH /pbi-configs/{config_id}` 之前——FastAPI 依路由註冊順序比對，`{config_id}` 這種單一路徑段會把字面上的 `"batch-update"` 當成 config_id 吃掉，順序反了會變成一直 404「找不到 PBI 設定：batch-update」，不會進到批次更新的邏輯。批次修改刻意只開放 `workspace_id`/`dataset_id`/`column_aliases`（底層 dataset 本身的屬性，多設定共用同一份資料時理應一致），`filters`/`query_modes` 不給批次改，因為它們的存在目的就是讓不同設定之間刻意不同（部門區隔），批次覆蓋容易靜默破壞管理員已經調好的存取範圍。
 - 「複製 PBI 設定」（`POST /pbi-configs/{id}/duplicate`）連同最新一版 `ModelChunk` 一起複製成新設定的版本 1，複製後兩份設定完全獨立（物理複製，不是共用連結）——上游語意模型變動時兩邊都要各自重新上傳，不會自動同步。
 
+## 版本管理
+
+從 **v1.0** 開始要看版本。版號同時寫在兩個地方，**必須一致**：git tag（`v1.0`）與 `main.py` 的 `FastAPI(version=...)`（會顯示在 `/docs` 與 OpenAPI，是 skill 端確認自己對到哪一版的依據）。
+
+用語意化版本，但判斷 MAJOR 的依據是**對外契約有沒有被破壞**，不是內部改動的大小：
+
+| 版號 | 什麼情況 | 例子 |
+|------|----------|------|
+| MAJOR | 破壞 skill 端契約，舊 skill 會直接壞掉 | `get_powerbi_token` 改成 `get_query_ticket`（就是 v1.0 的內容） |
+| MINOR | 純新增，舊 skill 不改也能繼續跑 | 多回 `query_modes`/`column_aliases` 欄位、`mode_id` 這種選填參數 |
+| PATCH | 修 bug、效能、文件、管理後台內部調整 | `get_model_detail` 的 cache、access log 補 `detail` 欄位 |
+
+**「對外契約」只指這三個介面**，只有它們的破壞性改動才算 MAJOR：
+
+1. MCP tools（名稱、參數、回傳結構）
+2. `POST /api/ticket/redeem`
+3. legacy REST `/api/models`、`/api/token`
+
+管理後台 API 與前端只有我們自己用，怎麼改都不影響版號判斷。
+
+打 tag 的時機：`main` 到達一個「skill 端可以對著它整合」的穩定點。**MAJOR 版一定要跟 skill 端協調部署順序**——server 先上會讓還沒遷移的 skill 卡在破壞掉的那一步（v1.0 的情況是卡在拿 token）。不確定能不能同步時，考慮保留舊介面當 deprecated 別名過渡，遷移完再移除。
+
 ## 分支策略
 
 1. `main` 必須隨時保持可直接部署——VM 是直接 `git pull` 這個分支上線的，任何未完成/未測試的功能不上 `main`。
