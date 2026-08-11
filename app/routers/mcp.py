@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timedelta
+from functools import lru_cache
 
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken, TokenVerifier
@@ -120,6 +121,50 @@ def _log_tool_access(db, user: User, tool_name: str) -> None:
     )
 
 
+class _ModelChunkMissing(Exception):
+    """內部用：找不到指定版本的語意模型。
+
+    刻意用例外而不是回傳 None，因為 `functools.lru_cache` **不會快取例外**。若快取了
+    None，「把某個設定的版本全部刪光後重新上傳」會讓版本號從 1 重新開始（見 admin.py
+    的 upload_model），然後撞到先前快取的 None 而誤判成「尚未上傳任何語意模型」。
+    """
+
+
+# 每筆約等於一份語意模型的大小（實測單一模型的 JSON 約 95KB），16 筆上限約 1.5MB，
+# 對 1GB RAM 的小型 VM 是可以接受的常駐量。
+_MODEL_CHUNK_CACHE_SIZE = 16
+
+
+@lru_cache(maxsize=_MODEL_CHUNK_CACHE_SIZE)
+def _load_model_chunk(pbi_config_id: str, model_version: int) -> tuple[dict, list]:
+    """讀取並快取語意模型的 relationships/tables。
+
+    這是 `get_model_detail` 最貴的部分：單一模型的 JSON 實測約 95KB，每次呼叫都要讓
+    SQLite 把 TEXT 讀出來再 `json.loads` 成 Python 物件，在小型 VM 上是實際負擔，而且
+    每個對話都至少會呼叫一次。
+
+    **快取 key 刻意只有 `(pbi_config_id, model_version)`**，不含 `PbiConfig` 的任何欄位——
+    因為這裡只快取「上傳之後就不會再變的模型結構」。`filters`／`query_modes`／
+    `column_aliases`／`workspace_id`／`dataset_id` 這些管理員隨時會在詳情頁改的東西，
+    一律由呼叫端每次從 `config` 物件現讀，所以改完立刻生效，不會因為快取而讀到舊值。
+    上傳新版本會讓 `model_version` 變動、key 自然改變，也就不需要任何主動失效機制。
+
+    回傳的結構是**多個呼叫共用的**，呼叫端只能讀、不可以就地修改。
+    """
+    with SessionLocal() as db:
+        chunk = (
+            db.query(ModelChunk)
+            .filter(
+                ModelChunk.pbi_config_id == pbi_config_id,
+                ModelChunk.model_version == model_version,
+            )
+            .first()
+        )
+        if not chunk:
+            raise _ModelChunkMissing
+        return chunk.relationships, chunk.tables
+
+
 def _check_access(user: User, pbi_config_id: str, db) -> PbiConfig:
     link = db.query(UserPbiConfig).filter(
         UserPbiConfig.user_id == user.id,
@@ -204,16 +249,23 @@ def get_mcp_server() -> FastMCP:
             user = _current_user(db)
             _log_tool_access(db, user, "get_model_detail")
             config = _check_access(user, pbi_config_id, db)
+            # 只撈 model_version 這一欄，不要整列 select——整列會連 relationships/tables
+            # 兩個大 JSON 欄位一起讀出來並解析，那正是下面要靠快取避開的成本。
             latest = (
-                db.query(ModelChunk)
+                db.query(ModelChunk.model_version)
                 .filter(ModelChunk.pbi_config_id == pbi_config_id)
                 .order_by(ModelChunk.model_version.desc())
                 .first()
             )
             if not latest:
                 raise ToolError("此 PBI 設定尚未上傳任何語意模型")
+            model_version = latest[0]
 
-            tables = latest.tables
+            try:
+                relationships, tables = _load_model_chunk(pbi_config_id, model_version)
+            except _ModelChunkMissing:
+                raise ToolError("此 PBI 設定尚未上傳任何語意模型")
+
             filters = list(config.filters or [])
             if mode_id:
                 mode = next((m for m in (config.query_modes or []) if m.get("mode_id") == mode_id), None)
@@ -236,13 +288,13 @@ def get_mcp_server() -> FastMCP:
             return {
                 "pbi_config_id": config.id,
                 "pbi_config_name": config.name,
-                "model_version": latest.model_version,
+                "model_version": model_version,
                 "workspace_id": config.workspace_id,
                 "dataset_id": config.dataset_id,
                 "query_mode_id": mode_id,
                 "filters": filters,
                 "column_aliases": config.column_aliases or [],
-                "relationships": latest.relationships,
+                "relationships": relationships,
                 "tables": tables,
             }
 
