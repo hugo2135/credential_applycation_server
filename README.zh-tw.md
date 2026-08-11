@@ -238,7 +238,7 @@ python scripts/chunk_model.py path/to/model.json
 | `oauth_authorization_codes` | 短效期一次性 authorization code（PKCE challenge、5 分鐘過期、用過即作廢） |
 | `oauth_refresh_tokens` | 長效 refresh token（只存 hash，90 天效期，每次使用輪換） |
 | `personal_access_tokens` | MCP Personal Access Token（只存 hash，無到期時間，給不支援 OAuth 的 MCP client 用） |
-| `access_logs` | 使用者存取歷史（誰、何時、用哪種方式、打了哪個路徑），只留 90 天，`main.py` 背景 task 每天清理 |
+| `access_logs` | 使用者存取歷史（誰、何時、用哪種方式、打了哪個路徑、對象是哪個 PBI 設定），只留 90 天，`main.py` 背景 task 每天清理 |
 | `access_tickets` | 一次性查詢 ticket（只存 hash，短效、用過即廢）。**刻意不存 access token**——跟 Azure AD 換 token 是在兌換當下才做 |
 
 ## Docker 部署

@@ -86,6 +86,7 @@ def redeem_ticket(
         path="/api/ticket/redeem",
         method=request.method,
         ip_address=client_ip(request),
+        detail=ticket.pbi_config_id,
     )
 
     # 不回傳 workspace_id/dataset_id：那兩個從 get_model_detail 拿，

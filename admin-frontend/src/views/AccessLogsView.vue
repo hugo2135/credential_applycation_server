@@ -36,6 +36,9 @@
         </template>
       </el-table-column>
       <el-table-column prop="path" label="路徑" min-width="160" />
+      <el-table-column label="對象 PBI 設定" min-width="140">
+        <template #default="{ row }">{{ row.detail ? configName(row.detail) : '—' }}</template>
+      </el-table-column>
       <el-table-column label="Method" width="90">
         <template #default="{ row }">{{ row.method || '—' }}</template>
       </el-table-column>
@@ -63,11 +66,19 @@ interface AccessLog {
   method: string | null
   auth_method: string
   ip_address: string | null
+  detail: string | null
   created_at: string
 }
 
 const logs = ref<AccessLog[]>([])
 const loading = ref(false)
+// detail 存的是 pbi_config_id，這裡另外抓一份設定清單把它顯示成看得懂的名稱。
+// 後端刻意只存 id：名稱之後改了，歷史紀錄仍然指向同一個設定。
+const configNames = ref<Record<string, string>>({})
+
+function configName(id: string) {
+  return configNames.value[id] ?? id
+}
 const filters = ref({
   email: '',
   authMethod: '',
@@ -129,5 +140,16 @@ async function exportCsv() {
   }
 }
 
-onMounted(load)
+async function loadConfigNames() {
+  try {
+    const { data } = await http.get('/pbi-configs')
+    configNames.value = Object.fromEntries(data.map((c: { id: string; name: string }) => [c.id, c.name]))
+  } catch {
+    // 名稱只是顯示用，抓不到就退回顯示原始 id，不影響主要功能
+  }
+}
+
+onMounted(async () => {
+  await Promise.all([load(), loadConfigNames()])
+})
 </script>

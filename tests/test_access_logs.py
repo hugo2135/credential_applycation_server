@@ -5,6 +5,7 @@ import asyncio
 import csv
 import io
 
+import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
@@ -126,5 +127,31 @@ def test_access_logs_export_csv(client, admin_token, active_user):
     assert res.headers["content-type"].startswith("text/csv")
 
     rows = list(csv.reader(io.StringIO(res.text)))
-    assert rows[0] == ["created_at", "email", "auth_method", "method", "path", "ip_address"]
+    assert rows[0] == ["created_at", "email", "auth_method", "method", "path", "ip_address", "detail"]
     assert any(row[1] == email for row in rows[1:])
+
+
+@pytest.mark.anyio
+async def test_tool_access_records_target_pbi_config(client, admin_token, mcp_access_token, live_server):
+    """get_model_detail／get_query_ticket 要把「這次針對哪個 PBI 設定」記進 detail。
+
+    查詢實際上是在 client 端直接打 Power BI 的，server 這邊唯一留得下的線索就是這筆
+    紀錄；要跟 Power BI 自己的 activity log 對起來還原「誰查了哪個模型」就得有這欄。
+    """
+    access_token, pbi_config_id, user_id = mcp_access_token
+    await _mcp_call_tool(live_server, access_token, "get_model_detail",
+                         {"pbi_config_id": pbi_config_id})
+
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+    users_res = client.get("/api/admin/users", headers=admin_headers)
+    email = next(u["email"] for u in users_res.json() if u["id"] == user_id)
+
+    logs = client.get("/api/admin/access-logs", headers=admin_headers, params={"email": email}).json()
+    detail_row = next(l for l in logs if l["path"] == "/mcp/get_model_detail")
+    assert detail_row["detail"] == pbi_config_id
+
+    # list_models 沒有特定對象，detail 應該留空而不是硬塞值
+    await _mcp_call_tool(live_server, access_token, "list_models", {})
+    logs = client.get("/api/admin/access-logs", headers=admin_headers, params={"email": email}).json()
+    list_row = next(l for l in logs if l["path"] == "/mcp/list_models")
+    assert list_row["detail"] is None

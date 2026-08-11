@@ -143,4 +143,7 @@ class AccessLog(Base):
     method = Column(String, nullable=True)  # /mcp 這個驗證點拿不到 HTTP method，留空
     auth_method = Column(String, nullable=False, index=True)  # user_session / oauth / pat / mask_key
     ip_address = Column(String, nullable=True)
+    # 該次操作的對象，目前放 pbi_config_id。Power BI 自己的 activity log 記的是執行
+    # 查詢的 SP，兩邊要 join 還原「誰查了哪個模型」就得知道這次要的是哪個設定。
+    detail = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)

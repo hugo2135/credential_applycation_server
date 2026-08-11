@@ -102,7 +102,7 @@ def _current_user(db) -> User:
     return user
 
 
-def _log_tool_access(db, user: User, tool_name: str) -> None:
+def _log_tool_access(db, user: User, tool_name: str, detail: str | None = None) -> None:
     # _JwtTokenVerifier 只在每個 HTTP request 驗證 token 時記一筆通用的 "/mcp"，
     # 不知道這個 request 實際觸發了哪個 tool（initialize/list_tools 這些協定層
     # 呼叫也會經過那裡）。這裡額外補一筆更精確的紀錄，path 帶上實際的 tool 名稱，
@@ -118,6 +118,7 @@ def _log_tool_access(db, user: User, tool_name: str) -> None:
         path=f"/mcp/{tool_name}",
         method=ctx["method"],
         ip_address=ctx["ip"],
+        detail=detail,
     )
 
 
@@ -247,7 +248,7 @@ def get_mcp_server() -> FastMCP:
         時行為跟以前完全一樣（全表、不含模式篩選）。"""
         with SessionLocal() as db:
             user = _current_user(db)
-            _log_tool_access(db, user, "get_model_detail")
+            _log_tool_access(db, user, "get_model_detail", detail=pbi_config_id)
             config = _check_access(user, pbi_config_id, db)
             # 只撈 model_version 這一欄，不要整列 select——整列會連 relationships/tables
             # 兩個大 JSON 欄位一起讀出來並解析，那正是下面要靠快取避開的成本。
@@ -322,7 +323,7 @@ def get_mcp_server() -> FastMCP:
         """
         with SessionLocal() as db:
             user = _current_user(db)
-            _log_tool_access(db, user, "get_query_ticket")
+            _log_tool_access(db, user, "get_query_ticket", detail=pbi_config_id)
             _check_access(user, pbi_config_id, db)
             # 先擋掉憑證沒設定的情況：不然使用者要等到腳本 redeem 時才會失敗，
             # 那時候的錯誤訊息離問題根源更遠、更難查。
