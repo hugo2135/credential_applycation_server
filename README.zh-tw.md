@@ -1,3 +1,4 @@
+[![CI/CD](https://github.com/hugo2135/credential_applycation_server/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/hugo2135/credential_applycation_server/actions/workflows/ci-cd.yml)
 # PBI Credential 申請程式
 
 管理使用者身份、發放 Power BI 存取憑證，並集中管理語意模型分發的 FastAPI 服務，附帶 Vue 3 管理後台與使用者自助頁面。
