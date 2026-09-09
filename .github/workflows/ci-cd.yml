@@ -52,6 +52,17 @@ jobs:
     # 要在這裡額外限制只在 push 到 main 時才真的執行，其他分支/PR 一律跳過（skipped，
     # 不算失敗，不會擋任何東西）。
     if: success() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # VM 是共用資源，同一時間只能有一個 deploy 對它動手。連續兩次 push（例如在 GitHub
+    # 網頁上連續改兩個檔案）會觸發兩個 run，兩邊的 docker compose up 撞在一起時，其中
+    # 一個會對另一個剛砍掉的容器動作，得到 "No such container: <id>" 而失敗——實際上
+    # 部署是成功的（有一邊跑完了），只是誤報成紅叉。
+    #
+    # 不用 cancel-in-progress：正在跑的 docker compose 被中途砍掉，容器可能停在半殘
+    # 狀態，比排隊更糟。排隊的那次頂多是 git pull 顯示 Already up to date、build 全走
+    # 快取，很快就結束。
+    concurrency:
+      group: deploy-vm
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       # 刻意不用第三方 GitHub Action（例如 appleboy/ssh-action）碰這把私鑰——
