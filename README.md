@@ -1,3 +1,4 @@
+[![CI/CD](https://github.com/hugo2135/credential_applycation_server/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/hugo2135/credential_applycation_server/actions/workflows/ci-cd.yml)
 # credential_application_server
 
 A FastAPI service that manages user identities, issues Power BI access credentials, and centrally distributes semantic-model metadata — now with a built-in **OAuth 2.1 authorization server** and **MCP server**, plus a Vue 3 admin console and user self-service portal. The governance backbone of the [nl-to-dax](https://github.com/hugo2135/nl-to-dax) self-service query platform.
