@@ -30,6 +30,8 @@ admin-frontend/node_modules/
 # IDE
 .vscode/
 .idea/
+# VS Code「另存工作區」產生的檔案，內容是各自電腦的路徑與個人設定，不該共用
+*.code-workspace
 
 # OS
 .DS_Store
