@@ -1,8 +1,11 @@
+import base64
+import binascii
 import html
 import os
 from datetime import datetime, timedelta
+from urllib.parse import unquote
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -229,8 +232,28 @@ def authorize_submit(
 
 # ── Token exchange ───────────────────────────────────────────────────────────
 
+def _client_id_from_basic_auth(request: Request) -> str | None:
+    """從 `Authorization: Basic base64(client_id:client_secret)` 取出 client_id。
+
+    要求使用者手動填 OAuth 用戶端 ID/密鑰的 client（例如 Gemini）換 token 時常用這種
+    送法（RFC 6749 §2.3.1 的 client_secret_basic），而不是放在表單的 client_id 欄位。
+    我們只核發 public client，所以密鑰收到就忽略，安全性仍靠 PKCE。
+    """
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("basic "):
+        return None
+    try:
+        decoded = base64.b64decode(auth[6:].strip()).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return None
+    # RFC 6749 規定 client_id/secret 要先 form-urlencode 再 base64
+    client_id = unquote(decoded.split(":", 1)[0])
+    return client_id or None
+
+
 @router.post("/oauth/token")
 def token_endpoint(
+    request: Request,
     grant_type: str = Form(...),
     code: str | None = Form(None),
     redirect_uri: str | None = Form(None),
@@ -239,6 +262,8 @@ def token_endpoint(
     refresh_token: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
+    client_id = client_id or _client_id_from_basic_auth(request)
+
     if grant_type == "authorization_code":
         if not (code and redirect_uri and client_id and code_verifier):
             raise HTTPException(status_code=400, detail="缺少必要參數")

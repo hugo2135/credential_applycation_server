@@ -42,15 +42,16 @@
       </el-table-column>
       <el-table-column label="已分配語意模型" min-width="180">
         <template #default="{ row }">
-          <template v-if="row.pbi_config_ids?.length">
-            <el-tag
-              v-for="id in row.pbi_config_ids"
-              :key="id"
-              size="small"
-              style="margin: 2px"
-            >
-              {{ configName(id) }}
-            </el-tag>
+          <template v-if="row.pbi_config_checks?.length">
+            <!-- 燈號：綠＝可查詢、紅＝無法查詢、灰＝未檢測；完整錯誤在「設定 → 指派模型」 -->
+            <el-tooltip v-for="c in row.pbi_config_checks" :key="c.pbi_config_id" placement="top">
+              <template #content>
+                <div style="max-width: 320px; white-space: pre-wrap">{{ checkTooltip(c) }}</div>
+              </template>
+              <el-tag size="small" style="margin: 2px">
+                <span :style="dotStyle(c.check_status)" />{{ configName(c.pbi_config_id) }}
+              </el-tag>
+            </el-tooltip>
           </template>
           <span v-else style="color: #c0c4cc; font-size: 13px">尚未分配</span>
         </template>
@@ -152,6 +153,51 @@
           </el-form-item>
         </el-form>
         <el-button type="primary" :loading="settingsDialog.saving" @click="saveAssign">儲存</el-button>
+
+        <el-divider content-position="left">查詢權限檢測</el-divider>
+        <p style="color: #666; margin-bottom: 12px; font-size: 13px">
+          用這位使用者的服務主體，對已儲存的每個模型跑一個最小查詢（不讀取實際資料），確認能不能真的查詢。
+          儲存 Azure AD 憑證或指派模型後會自動檢測。
+        </p>
+        <div v-if="!settingsDialog.checks.length" style="color: #c0c4cc; font-size: 13px">尚未指派任何模型</div>
+        <div
+          v-for="c in settingsDialog.checks"
+          :key="c.pbi_config_id"
+          style="border: 1px solid #ebeef5; border-radius: 4px; padding: 10px 12px; margin-bottom: 8px"
+        >
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px">
+            <span>
+              <span :style="dotStyle(c.check_status)" /><b>{{ configName(c.pbi_config_id) }}</b>
+              <span style="color: #909399; font-size: 12px; margin-left: 8px">
+                {{ statusLabel(c.check_status) }}<template v-if="c.checked_at"> · {{ fmtDate(c.checked_at) }}</template>
+              </span>
+            </span>
+            <el-button
+              size="small"
+              link
+              type="primary"
+              :loading="settingsDialog.checkingId === c.pbi_config_id"
+              :disabled="!!settingsDialog.checkingId"
+              @click="runChecks([c.pbi_config_id])"
+            >
+              重新檢測
+            </el-button>
+          </div>
+          <!-- 完整訊息（白話原因＋原始錯誤），可以選取複製給管理 Azure／Power BI 的人 -->
+          <div
+            v-if="c.check_status === 'failed' && c.check_message"
+            style="margin-top: 6px; font-size: 12px; color: #f56c6c; white-space: pre-wrap; word-break: break-all"
+          >{{ c.check_message }}</div>
+        </div>
+        <el-button
+          v-if="settingsDialog.checks.length > 1"
+          size="small"
+          :loading="settingsDialog.checkingId === 'all'"
+          :disabled="!!settingsDialog.checkingId"
+          @click="runChecks(null)"
+        >
+          全部重新檢測
+        </el-button>
       </el-tab-pane>
 
       <el-tab-pane label="重設 Key" name="resetKey">
@@ -239,6 +285,13 @@ import { ElMessage } from 'element-plus'
 import http from '@/api/http'
 import { formatDate, parseUtcDate } from '@/utils/date'
 
+type CheckStatus = 'ok' | 'failed' | null
+interface ConfigCheck {
+  pbi_config_id: string
+  check_status: CheckStatus
+  check_message: string | null
+  checked_at: string | null
+}
 interface User {
   id: string
   email: string
@@ -246,6 +299,7 @@ interface User {
   has_credentials: boolean
   client_secret_expires_at: string | null
   pbi_config_ids: string[]
+  pbi_config_checks: ConfigCheck[]
   expires_at: string | null
   is_locked: boolean
 }
@@ -270,6 +324,8 @@ const settingsDialog = ref({
   activateForm: { isActive: false, expiresAt: null as Date | null },
   credForm: { tenant_id: '', client_id: '', client_secret: '', client_secret_expires_at: null as Date | null },
   assignConfigIds: [] as string[],
+  checks: [] as ConfigCheck[],
+  checkingId: null as string | null, // 正在檢測的 pbi_config_id，全部檢測時為 'all'
   patTokens: [] as McpToken[],
   patLoading: false,
 })
@@ -286,8 +342,69 @@ async function load() {
     const [u, c] = await Promise.all([http.get('/users'), http.get('/pbi-configs')])
     users.value = u.data
     configs.value = c.data
+    // 設定彈窗開著時，同步最新的使用者資料與檢測結果（不動使用者正在編輯的表單）
+    const d = settingsDialog.value
+    if (d.visible && d.user) {
+      const fresh = users.value.find((x) => x.id === d.user!.id)
+      if (fresh) {
+        d.user = fresh
+        d.checks = fresh.pbi_config_checks ?? []
+      }
+    }
   } finally {
     loading.value = false
+  }
+}
+
+// ── 查詢權限檢測 ────────────────────────────────────────────────────
+
+const STATUS_COLORS = { ok: '#67c23a', failed: '#f56c6c', none: '#c0c4cc' }
+
+function dotStyle(status: CheckStatus) {
+  return {
+    display: 'inline-block',
+    width: '8px',
+    height: '8px',
+    borderRadius: '50%',
+    marginRight: '6px',
+    verticalAlign: 'middle',
+    background: STATUS_COLORS[status ?? 'none'],
+  }
+}
+
+function statusLabel(status: CheckStatus) {
+  return status === 'ok' ? '可查詢' : status === 'failed' ? '無法查詢' : '未檢測'
+}
+
+/** 列表 tooltip 只放一句白話原因（訊息第一行）和檢測時間，完整內容在設定彈窗 */
+function checkTooltip(c: ConfigCheck) {
+  if (!c.check_status) return '未檢測：到「設定 → 指派模型」執行檢測'
+  const reason = c.check_status === 'failed' ? `：${(c.check_message ?? '').split('\n')[0]}` : ''
+  return `${statusLabel(c.check_status)}${reason}\n檢測時間：${fmtDate(c.checked_at)}`
+}
+
+async function runChecks(pbiConfigIds: string[] | null, opts: { auto?: boolean } = {}) {
+  const d = settingsDialog.value
+  if (!d.user) return
+  d.checkingId = pbiConfigIds?.length === 1 ? pbiConfigIds[0]! : 'all'
+  try {
+    const { data } = await http.post<ConfigCheck[]>(`/users/${d.user.id}/query-check`, {
+      pbi_config_ids: pbiConfigIds,
+    })
+    const failed = data.filter((r) => r.check_status === 'failed').length
+    if (!data.length) {
+      if (!opts.auto) ElMessage.info('尚未指派任何模型')
+    } else if (failed) {
+      ElMessage.warning(`${failed} 個模型無法查詢，原因見「指派模型」分頁`)
+      d.activeTab = 'assign'
+    } else {
+      ElMessage.success(`檢測完成：${data.length} 個模型都可以查詢`)
+    }
+    await load()
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.detail ?? '檢測失敗')
+  } finally {
+    d.checkingId = null
   }
 }
 
@@ -325,6 +442,8 @@ function openSettings(row: User) {
       client_secret_expires_at: parseUtcDate(row.client_secret_expires_at),
     },
     assignConfigIds: [...(row.pbi_config_ids ?? [])],
+    checks: row.pbi_config_checks ?? [],
+    checkingId: null,
     patTokens: [],
     patLoading: false,
   }
@@ -391,9 +510,12 @@ async function saveCredentials() {
     await load()
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail ?? '設定失敗')
+    return
   } finally {
     d.saving = false
   }
+  // 憑證換了，所有模型的舊結果都已被後端重置，全部重新檢測
+  await runChecks(null, { auto: true })
 }
 
 async function saveAssign() {
@@ -406,9 +528,13 @@ async function saveAssign() {
     await load()
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail ?? '操作失敗')
+    return
   } finally {
     d.saving = false
   }
+  // 只檢測還沒有結果的（新指派的），原本就檢測過的模型保留結果
+  const pending = d.checks.filter((c) => !c.check_status).map((c) => c.pbi_config_id)
+  if (pending.length) await runChecks(pending, { auto: true })
 }
 
 async function resetMaskKey() {

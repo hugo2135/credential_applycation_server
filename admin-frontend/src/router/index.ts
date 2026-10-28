@@ -28,7 +28,13 @@ const router = createRouter({
       path: '/mcp-tokens',
       name: 'mcp-tokens',
       component: () => import('@/views/McpTokenView.vue'),
-      meta: { layout: 'user', requiresAuth: 'user', title: 'PBI 憑證申請 - MCP Token' },
+      meta: { layout: 'user', requiresAuth: 'user', title: 'PBI 憑證申請 - MCP 連線設定' },
+    },
+    {
+      path: '/bookmarks',
+      name: 'bookmarks',
+      component: () => import('@/views/BookmarksView.vue'),
+      meta: { layout: 'user', requiresAuth: 'user', title: 'PBI 憑證申請 - 我的書籤' },
     },
 
     // ── Admin routes ─────────────────────────────────────────

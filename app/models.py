@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Boolean, DateTime, Integer, JSON, Text, ForeignKey
+from sqlalchemy import Column, String, Boolean, DateTime, Integer, JSON, Text, ForeignKey, UniqueConstraint
 from app.database import Base
 
 
@@ -47,6 +47,12 @@ class UserPbiConfig(Base):
 
     user_id = Column(String, ForeignKey("users.id"), primary_key=True)
     pbi_config_id = Column(String, ForeignKey("pbi_config.id"), primary_key=True)
+    # 查詢權限檢測結果（見 app/query_check.py）。記在「使用者 × 模型」這一層而不是使用者
+    # 身上：同一個人可能 A 模型查得到、B 模型查不到（例如 SP 只被加進其中一個 workspace）。
+    # check_status 為 None 代表未檢測／結果已失效（憑證或 workspace/dataset 改過）。
+    check_status = Column(String, nullable=True)  # "ok" / "failed"
+    check_message = Column(Text, nullable=True)  # 白話原因 + 原始錯誤，給管理員看
+    checked_at = Column(DateTime, nullable=True)
 
 
 class ModelChunk(Base):
@@ -131,6 +137,27 @@ class AccessTicket(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     expires_at = Column(DateTime, nullable=False, index=True)
     used_at = Column(DateTime, nullable=True)
+
+
+class Bookmark(Base):
+    """使用者存下來的常用查詢，由 skill 透過 MCP tool 存取，使用者也能在 /bookmarks 管理、匯出匯入。
+
+    綁定 pbi_config_id：DAX 是針對某個語意模型寫的，拿到別的模型跑一定失敗。
+    model_version 記存檔當下的模型版本，模型升版後 skill 據此判斷 DAX 可能過時，
+    再用 question（原始自然語言問題）重新生成。同一使用者、同一模型下標題不可重複，
+    重複時由 skill 問過使用者後才覆蓋（見 mcp.py 的 save_bookmark）。"""
+    __tablename__ = "bookmarks"
+    __table_args__ = (UniqueConstraint("user_id", "pbi_config_id", "title"),)
+
+    id = Column(String, primary_key=True, default=new_uuid)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    pbi_config_id = Column(String, ForeignKey("pbi_config.id"), nullable=False, index=True)
+    title = Column(String, nullable=False)
+    dax = Column(Text, nullable=False)
+    question = Column(Text, nullable=True)
+    model_version = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class AccessLog(Base):

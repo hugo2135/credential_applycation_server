@@ -15,7 +15,8 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import AccessLog, PersonalAccessToken, User, PbiConfig, ModelChunk, UserPbiConfig
+from app.models import AccessLog, Bookmark, PersonalAccessToken, User, PbiConfig, ModelChunk, UserPbiConfig
+from app.query_check import check_user_configs, link_check_dict, reset_checks
 from app.security import MAX_LOGIN_ATTEMPTS, encrypt_secret, issue_admin_jwt, verify_admin_jwt
 from scripts.chunk_model import parse_model
 
@@ -66,8 +67,10 @@ def list_users(_=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
     users = db.query(User).all()
     links = db.query(UserPbiConfig).all()
     config_map: dict[str, list[str]] = {}
+    check_map: dict[str, list[dict]] = {}
     for lnk in links:
         config_map.setdefault(lnk.user_id, []).append(lnk.pbi_config_id)
+        check_map.setdefault(lnk.user_id, []).append(link_check_dict(lnk))
     return [
         {
             "id": u.id,
@@ -75,6 +78,8 @@ def list_users(_=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
             "is_active": u.is_active,
             "is_admin": u.is_admin,
             "pbi_config_ids": config_map.get(u.id, []),
+            # 每個已指派模型的查詢權限檢測結果（check_status: ok / failed / null=未檢測）
+            "pbi_config_checks": check_map.get(u.id, []),
             "has_credentials": bool(u.tenant_id and u.client_id and u.client_secret_enc),
             "client_secret_expires_at": u.client_secret_expires_at,
             "expires_at": u.expires_at,
@@ -144,6 +149,7 @@ def delete_user(
     if not user:
         raise HTTPException(status_code=404, detail="找不到使用者")
     db.query(UserPbiConfig).filter(UserPbiConfig.user_id == user_id).delete()
+    db.query(Bookmark).filter(Bookmark.user_id == user_id).delete()
     db.delete(user)
     db.commit()
 
@@ -242,7 +248,8 @@ def batch_delete_users(
     db: Session = Depends(get_db),
 ):
     db.query(UserPbiConfig).filter(UserPbiConfig.user_id.in_(body.user_ids)).delete(synchronize_session=False)
-    deleted = db.query(User).filter(User.id.in_(body.user_ids)).delete(synchronize_session=False)
+    db.query(Bookmark).filter(Bookmark.user_id.in_(body.user_ids)).delete(synchronize_session=False)
+    deleted =db.query(User).filter(User.id.in_(body.user_ids)).delete(synchronize_session=False)
     db.commit()
     return {"message": f"已刪除 {deleted} 位使用者"}
 
@@ -337,6 +344,7 @@ def set_user_credentials(
     user.client_id = body.client_id
     user.client_secret_enc = encrypt_secret(body.client_secret)
     user.client_secret_expires_at = body.client_secret_expires_at
+    reset_checks(db, user_id=user_id)
     db.commit()
     return {"message": "Azure AD 憑證設定成功"}
 
@@ -353,11 +361,37 @@ def set_user_pbi_configs(
     for cid in body.pbi_config_ids:
         if not db.query(PbiConfig).filter(PbiConfig.id == cid).first():
             raise HTTPException(status_code=404, detail=f"找不到 PBI 設定：{cid}")
-    db.query(UserPbiConfig).filter(UserPbiConfig.user_id == user_id).delete()
-    for cid in body.pbi_config_ids:
+    # 只刪掉被取消的、只新增新的，沒變動的指派原樣保留——整批刪掉重建會把它們的
+    # 查詢權限檢測結果一起洗掉，列表上的燈號就會無故變回「未檢測」。
+    wanted = set(body.pbi_config_ids)
+    existing = db.query(UserPbiConfig).filter(UserPbiConfig.user_id == user_id).all()
+    for link in existing:
+        if link.pbi_config_id not in wanted:
+            db.delete(link)
+    for cid in wanted - {link.pbi_config_id for link in existing}:
         db.add(UserPbiConfig(user_id=user_id, pbi_config_id=cid))
     db.commit()
     return {"message": "PBI 設定指派成功"}
+
+
+class QueryCheckRequest(BaseModel):
+    # 留空代表檢測該使用者所有已指派的模型
+    pbi_config_ids: Optional[list[str]] = None
+
+
+@router.post("/users/{user_id}/query-check")
+def run_user_query_check(
+    user_id: str,
+    body: QueryCheckRequest,
+    _=Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    """用使用者的 SP 對已指派模型各跑一次最小查詢，結果寫回並回傳（見 app/query_check.py）。
+    一個模型約需 1～3 秒（換 Azure AD token + 打 Power BI），模型多時前端要顯示 loading。"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="找不到使用者")
+    return check_user_configs(db, user, body.pbi_config_ids)
 
 
 # ── PBI 設定管理 ───────────────────────────────────────────────────────────
@@ -481,14 +515,19 @@ def batch_update_pbi_configs(
     db: Session = Depends(get_db),
 ):
     configs = db.query(PbiConfig).filter(PbiConfig.id.in_(body.config_ids)).all()
+    target_changed = []
     for config in configs:
-        if body.workspace_id is not None:
+        if body.workspace_id is not None and body.workspace_id != config.workspace_id:
             config.workspace_id = body.workspace_id
-        if body.dataset_id is not None:
+            target_changed.append(config.id)
+        if body.dataset_id is not None and body.dataset_id != config.dataset_id:
             config.dataset_id = body.dataset_id
+            target_changed.append(config.id)
         if body.column_aliases is not None:
             config.column_aliases = [a.model_dump() for a in body.column_aliases]
         config.updated_at = datetime.utcnow()
+    if target_changed:
+        reset_checks(db, pbi_config_ids=list(set(target_changed)))
     db.commit()
     return {"message": f"已更新 {len(configs)} 筆 PBI 設定"}
 
@@ -503,10 +542,16 @@ def update_pbi_config(
     config = db.query(PbiConfig).filter(PbiConfig.id == config_id).first()
     if not config:
         raise HTTPException(status_code=404, detail="找不到 PBI 設定")
-    if body.workspace_id is not None:
+    target_changed = False
+    if body.workspace_id is not None and body.workspace_id != config.workspace_id:
         config.workspace_id = body.workspace_id
-    if body.dataset_id is not None:
+        target_changed = True
+    if body.dataset_id is not None and body.dataset_id != config.dataset_id:
         config.dataset_id = body.dataset_id
+        target_changed = True
+    if target_changed:
+        # 指向的 dataset 換了，之前的檢測結果不再代表現況
+        reset_checks(db, pbi_config_ids=[config_id])
     if body.filters is not None:
         config.filters = [f.model_dump() for f in body.filters]
     if body.query_modes is not None:
@@ -573,6 +618,7 @@ def delete_pbi_config(
     if not config:
         raise HTTPException(status_code=404, detail="找不到 PBI 設定")
     db.query(UserPbiConfig).filter(UserPbiConfig.pbi_config_id == config_id).delete()
+    db.query(Bookmark).filter(Bookmark.pbi_config_id == config_id).delete()
     db.query(ModelChunk).filter(ModelChunk.pbi_config_id == config_id).delete()
     db.delete(config)
     db.commit()

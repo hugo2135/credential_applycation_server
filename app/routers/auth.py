@@ -1,13 +1,16 @@
 import os
 from typing import Optional
+from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request, Security, status
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
+from app import bookmarks as bookmark_store
 from app.access_log import client_ip, record_access
 from app.database import get_db
-from app.models import PersonalAccessToken, User
+from app.models import OAuthClient, PersonalAccessToken, User
 from app.security import (
     hash_password, authenticate_user,
     generate_mask_key, hash_mask_key,
@@ -185,3 +188,108 @@ def delete_mcp_token(
         raise HTTPException(status_code=404, detail="找不到 token")
     db.delete(token)
     db.commit()
+
+
+# ── 手動 OAuth client 註冊（給不會自己做 Dynamic Client Registration 的 MCP client） ──
+
+class OAuthClientRequest(BaseModel):
+    redirect_uri: str
+
+
+def _is_allowed_redirect_uri(uri: str) -> bool:
+    parsed = urlparse(uri)
+    if not parsed.netloc:
+        return False
+    if parsed.scheme == "https":
+        return True
+    # 本機跑的 MCP client（CLI 類）會用 http://localhost 接 callback
+    return parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1")
+
+
+@router.post("/oauth-clients")
+def get_or_create_oauth_client(
+    body: OAuthClientRequest,
+    payload: dict = Depends(_require_user),
+    db: Session = Depends(get_db),
+):
+    """代替 MCP client 做 Dynamic Client Registration，回傳 client_id 讓使用者貼進 client 設定。
+
+    有些 client（例如 Gemini 網頁版）不會自己打 /oauth/register，而是要使用者手動填 OAuth
+    用戶端 ID。這支端點讓使用者在 /mcp-tokens 貼上該 client 給的重新導向 URI 就能拿到。
+
+    同一個 redirect_uri 一律回傳同一個 client_id（取最早註冊的那筆）：client_id 只代表
+    「哪個應用程式」而不是「哪個人」，身份仍由每個人在 /oauth/authorize 自己登入決定，
+    所以所有 Gemini 使用者共用一個 client_id 是安全的，也避免每貼一次就多一筆垃圾 client。
+    開放給一般使用者不會擴大攻擊面——/oauth/register 本來就允許任何人匿名註冊。
+    """
+    user = db.query(User).filter(User.id == payload["sub"]).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="使用者不存在")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="帳號尚未開通，請聯絡管理員")
+
+    uri = body.redirect_uri.strip()
+    if not _is_allowed_redirect_uri(uri):
+        raise HTTPException(status_code=400, detail="重新導向 URI 格式不正確，必須是 https:// 開頭的完整網址")
+
+    # redirect_uris 是 JSON 欄位，SQLite 上不好直接比對陣列內容，數量不多，在 Python 這邊找即可
+    for client in db.query(OAuthClient).order_by(OAuthClient.created_at).all():
+        if uri in (client.redirect_uris or []):
+            return {"client_id": client.client_id, "redirect_uri": uri}
+
+    client = OAuthClient(client_name=f"手動註冊（{urlparse(uri).hostname}）", redirect_uris=[uri])
+    db.add(client)
+    db.commit()
+    db.refresh(client)
+    return {"client_id": client.client_id, "redirect_uri": uri}
+
+
+# ── 書籤（常用查詢）：skill 透過 MCP tool 存，使用者在 /bookmarks 頁面管理、匯出匯入 ──
+
+class BookmarkImportRequest(BaseModel):
+    # 整份匯出檔原樣放進來（格式見 app/bookmarks.py 的 export_bookmarks）
+    data: dict
+    on_conflict: str = "skip"  # 同名時 skip（略過）或 overwrite（覆蓋）
+
+
+@router.get("/bookmarks")
+def list_my_bookmarks(
+    pbi_config_id: Optional[str] = None,
+    payload: dict = Depends(_require_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        return bookmark_store.list_bookmarks(db, payload["sub"], pbi_config_id)
+    except bookmark_store.BookmarkError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+
+@router.get("/bookmarks/export")
+def export_my_bookmarks(payload: dict = Depends(_require_user), db: Session = Depends(get_db)):
+    data = bookmark_store.export_bookmarks(db, payload["sub"])
+    return JSONResponse(
+        content=data,
+        headers={"Content-Disposition": 'attachment; filename="nl-to-dax-bookmarks.json"'},
+    )
+
+
+@router.post("/bookmarks/import")
+def import_my_bookmarks(
+    body: BookmarkImportRequest,
+    payload: dict = Depends(_require_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        return bookmark_store.import_bookmarks(db, payload["sub"], body.data, body.on_conflict)
+    except bookmark_store.BookmarkError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/bookmarks/{bookmark_id}", status_code=204)
+def delete_my_bookmark(
+    bookmark_id: str,
+    payload: dict = Depends(_require_user),
+    db: Session = Depends(get_db),
+):
+    if not bookmark_store.delete_bookmark(db, payload["sub"], bookmark_id):
+        raise HTTPException(status_code=404, detail="找不到書籤")

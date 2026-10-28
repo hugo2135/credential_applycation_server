@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
+from app import bookmarks as bookmark_store
 from app.access_log import get_mcp_request_context, record_access
 from app.database import SessionLocal
 from app.models import AccessTicket, ModelChunk, PbiConfig, PersonalAccessToken, User, UserPbiConfig
@@ -345,6 +346,75 @@ def get_mcp_server() -> FastMCP:
             "redeem_url": f"{_issuer()}/api/ticket/redeem",
             "expires_in": ttl,
         }
+
+    @server.tool()
+    async def list_bookmarks(pbi_config_id: str | None = None) -> list[dict]:
+        """列出使用者存過的書籤（常用查詢），可用 pbi_config_id 只看某個模型的。
+
+        每筆含 title、dax、question（存檔時的原始自然語言問題）。執行書籤時跟一般查詢
+        一樣：先呼叫 get_query_ticket，再把書籤的 dax 交給查詢腳本。
+
+        **possibly_outdated 為 true 時**，代表存檔後語意模型升過版（model_version !=
+        current_model_version），DAX 引用的表/欄位可能已改名或刪除。這時請先告知使用者，
+        並建議改用 question 搭配 get_model_detail 重新生成 DAX，不要直接執行舊的 DAX。
+        """
+        with SessionLocal() as db:
+            user = _current_user(db)
+            _log_tool_access(db, user, "list_bookmarks", detail=pbi_config_id)
+            try:
+                return bookmark_store.list_bookmarks(db, user.id, pbi_config_id)
+            except bookmark_store.BookmarkError as e:
+                raise ToolError(str(e))
+
+    @server.tool()
+    async def save_bookmark(
+        pbi_config_id: str,
+        title: str,
+        dax: str,
+        question: str | None = None,
+        overwrite: bool = False,
+    ) -> dict:
+        """把一個查詢存成書籤。title 是給使用者辨識用的名稱，dax 是完整的 DAX 查詢，
+        question 建議一併帶上使用者原本的自然語言問題（模型改版後可以據此重新生成 DAX）。
+
+        **同一個模型下標題不可重複。** 第一次呼叫請一律用 overwrite=false：若已有同名
+        書籤，這裡不會覆蓋，而是回傳 saved=false、conflict=true 以及既有書籤的內容。
+        **這時必須先把既有書籤的內容告訴使用者，詢問是否要覆蓋**，使用者同意後才可以帶
+        overwrite=true 再呼叫一次；使用者不同意就請他換一個標題。不可以未經使用者同意
+        就自行帶 overwrite=true。
+        """
+        with SessionLocal() as db:
+            user = _current_user(db)
+            _log_tool_access(db, user, "save_bookmark", detail=pbi_config_id)
+            try:
+                status, bookmark = bookmark_store.save_bookmark(
+                    db, user.id, pbi_config_id, title, dax, question, overwrite,
+                )
+            except bookmark_store.BookmarkError as e:
+                raise ToolError(str(e))
+            config = db.query(PbiConfig).filter(PbiConfig.id == pbi_config_id).first()
+            item = bookmark_store.bookmark_dict(
+                bookmark, config.name if config else None,
+                bookmark_store.latest_model_version(db, pbi_config_id),
+            )
+            if status == "conflict":
+                return {
+                    "saved": False,
+                    "conflict": True,
+                    "message": "已有同名書籤，請先詢問使用者是否覆蓋；同意後帶 overwrite=true 再呼叫一次",
+                    "existing": item,
+                }
+            return {"saved": True, "conflict": False, "status": status, "bookmark": item}
+
+    @server.tool()
+    async def delete_bookmark(bookmark_id: str) -> dict:
+        """刪除一個書籤（bookmark_id 從 list_bookmarks 取得）。刪除前請先跟使用者確認。"""
+        with SessionLocal() as db:
+            user = _current_user(db)
+            _log_tool_access(db, user, "delete_bookmark", detail=bookmark_id)
+            if not bookmark_store.delete_bookmark(db, user.id, bookmark_id):
+                raise ToolError("找不到這個書籤")
+            return {"deleted": True}
 
     _mcp_server = server
     return server

@@ -26,6 +26,7 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 | 管理員 SPA | POST /api/admin/login（ADMIN_SECRET） → 1 hr HS256 JWT，Bearer |
 | 使用者 SPA | POST /auth/login（帳密） → user session JWT，Bearer |
 | MCP connector | OAuth 2.1 + PKCE（`/oauth/authorize` 沿用使用者帳密登入）→ 1 hr access JWT + 90 天 refresh token（每次使用輪換，只存 hash） |
+| MCP connector（支援 OAuth 但不做 DCR，要手動填用戶端 ID，如 Gemini 網頁版） | 使用者在 `/mcp-tokens` 貼上 client 的重新導向 URI，`POST /auth/oauth-clients` 代為註冊並回傳 client_id（同一 URI 一律回同一個 ID，所有人共用）；之後走一般 OAuth + PKCE。`/oauth/token` 也接受 HTTP Basic 帶 client_id，密鑰忽略 |
 | MCP connector（不支援 OAuth，如 Antigravity） | 使用者在 `/mcp-tokens` 自助產生 Personal Access Token（`pat_` 開頭），貼進該 client 設定當固定 Bearer，無到期時間，只能撤銷 |
 | Skill API（legacy） | Authorization: Bearer \<PBI_MASK_KEY\>（SHA-256 hash 存 DB） |
 
@@ -52,6 +53,8 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 - `PbiConfig.column_aliases`（重點欄位別名）不受 `mode_id` 影響，`get_model_detail` 固定整包回傳；跟 `filters` 是完全不同的機制——`filters` 是關鍵字比對後注入整段 DAX 布林運算式，`column_aliases` 是「欄位＋值＋同義詞」的對照表，給 skill 在生成 DAX 前把使用者的自然語言用詞（例如「北部」）轉換成 Power BI 實際存的欄位值（例如 `"North"`）。
 - `admin.py` 的 `PATCH /pbi-configs/batch-update` **必須**註冊在 `PATCH /pbi-configs/{config_id}` 之前——FastAPI 依路由註冊順序比對，`{config_id}` 這種單一路徑段會把字面上的 `"batch-update"` 當成 config_id 吃掉，順序反了會變成一直 404「找不到 PBI 設定：batch-update」，不會進到批次更新的邏輯。批次修改刻意只開放 `workspace_id`/`dataset_id`/`column_aliases`（底層 dataset 本身的屬性，多設定共用同一份資料時理應一致），`filters`/`query_modes` 不給批次改，因為它們的存在目的就是讓不同設定之間刻意不同（部門區隔），批次覆蓋容易靜默破壞管理員已經調好的存取範圍。
 - 「複製 PBI 設定」（`POST /pbi-configs/{id}/duplicate`）連同最新一版 `ModelChunk` 一起複製成新設定的版本 1，複製後兩份設定完全獨立（物理複製，不是共用連結）——上游語意模型變動時兩邊都要各自重新上傳，不會自動同步。
+- **查詢權限檢測**（`app/query_check.py`，`POST /api/admin/users/{id}/query-check`）用使用者的 SP 對已指派模型跑 `EVALUATE ROW("ok", 1)`，結果記在 `UserPbiConfig.check_status/check_message/checked_at`（「使用者 × 模型」層級，因為同一人可能 A 模型通、B 模型不通）。這是 server 唯一自己打 Power BI 的地方，**不違反「server 不代理查詢」**——那條規則是怕 MCP tool 的同步呼叫卡住 event loop；這裡是管理員手動觸發、跑在一般 FastAPI 同步端點（thread pool），跟 ticket redeem 同理。結果會在三種情況被 `reset_checks()` 重置成未檢測：改 Azure AD 憑證、PBI 設定的 `workspace_id`/`dataset_id` **真的變動**（送一樣的值不算）。`PUT /users/{id}/pbi-configs` 因此改成差異更新（只刪被取消的、只加新的），整批刪掉重建會把沒變動的模型檢測結果一起洗掉。前端在儲存憑證／指派後自動觸發檢測；錯誤訊息第一行是白話原因、後面附原始錯誤（AADSTS 錯誤碼、Power BI 回應 body），翻譯表在 `query_check.py` 的 `_AAD_HINTS`/`_POWERBI_HINTS`。
+- **書籤**（`Bookmark` 表、`app/bookmarks.py`）由 MCP tool（`list_bookmarks`/`save_bookmark`/`delete_bookmark`）與使用者網頁（`/auth/bookmarks`，含匯出匯入）共用同一份邏輯。綁定 `pbi_config_id`，只顯示目前仍被指派的模型的書籤（取消指派是隱藏不是刪除）。`save_bookmark` 同名時**刻意不覆蓋**，回傳 `conflict` 與既有內容，tool 說明要求 AI 先問使用者、同意後才帶 `overwrite=true`。存檔時記下 `model_version`，模型升版後 `possibly_outdated=true`，skill 應改用 `question` 重新生成。每人上限 100 筆（保護小 VM）。刪除使用者或 PBI 設定時一併刪除書籤。
 
 ## 版本管理
 
@@ -116,6 +119,8 @@ app/
   main.py          FastAPI 入口（CORS、SPA static、MCP mount + lifespan、access_logs 每日清理 task）
   security.py      JWT、密碼、AES、PKCE 驗證、MCP token 簽發
   access_log.py    存取歷史寫入共用邏輯（record_access），三個身份驗證點都呼叫這裡
+  bookmarks.py     書籤共用邏輯（MCP tool 與 /auth/bookmarks 共用，含匯出匯入格式）
+  query_check.py   查詢權限檢測（用使用者 SP 跑最小查詢 + 錯誤翻譯）
   models.py        SQLAlchemy ORM（含 OAuth 三張表 + personal_access_tokens + access_logs + access_tickets）
   database.py      SQLAlchemy 設定
   routers/
@@ -123,7 +128,7 @@ app/
     credential.py  /api（Skill legacy），也提供 acquire_powerbi_token 給 ticket redeem 用
     admin.py       /api/admin（管理員）
     oauth.py       /oauth、/.well-known（OAuth 2.1 authorization server）
-    mcp.py         /mcp（MCP server + tools：list_models/get_model_detail(mode_id?)/get_query_ticket）
+    mcp.py         /mcp（MCP server + tools：list_models/get_model_detail(mode_id?)/get_query_ticket/list_bookmarks/save_bookmark/delete_bookmark）
     ticket.py      /api/ticket/redeem（一次性 ticket 換 Power BI access token，給 skill 腳本呼叫）
 admin-frontend/    Vue 3 SPA（Element Plus + Pinia）
 scripts/
@@ -140,7 +145,8 @@ docs/
 /login              使用者登入
 /register           使用者自助註冊
 /dashboard          使用者登入後首頁（查看憑證狀態、領取 key，連結到 /mcp-tokens）
-/mcp-tokens         MCP Personal Access Token 自助管理（跟 PBI_MASK_KEY UI 刻意分開，避免混淆兩種機制）
+/bookmarks          我的書籤（查看、刪除、匯出匯入；書籤本身由 skill 透過 MCP tool 存入）
+/mcp-tokens         MCP 連線設定：手動取得 OAuth 用戶端 ID（Gemini 類）＋ Personal Access Token 自助管理（跟 PBI_MASK_KEY UI 刻意分開，避免混淆兩種機制）
 
 /admin                  重導向至 /admin/login
 /admin/login            管理員登入

@@ -75,13 +75,23 @@
     <!-- 不支援 OAuth 連線的 MCP client，跟上面的 PBI_MASK_KEY 是不同機制 -->
     <el-card style="margin-top: 20px">
       <template #header>
-        <span style="font-size: 16px; font-weight: 600">MCP Personal Access Token</span>
+        <span style="font-size: 16px; font-weight: 600">MCP 連線設定</span>
       </template>
       <p style="color: #666; margin-bottom: 16px; font-size: 14px">
-        如果你使用的 MCP client（例如 Antigravity）不支援 OAuth 連線流程、需要手動貼上固定
-        Bearer token，請到專屬頁面產生這種 token（跟上方的 PBI_MASK_KEY 用途不同，不要混用）。
+        如果你的 AI 工具連線時要你手動填東西——例如 Gemini 要你填「OAuth 用戶端 ID」，或
+        Antigravity 要你貼上 Bearer token——請到這個頁面取得（跟上方的 PBI_MASK_KEY 用途不同，不要混用）。
       </p>
-      <el-button @click="router.push('/mcp-tokens')">前往管理 MCP Token</el-button>
+      <el-button @click="router.push('/mcp-tokens')">前往 MCP 連線設定</el-button>
+    </el-card>
+
+    <el-card style="margin-top: 20px">
+      <template #header>
+        <span style="font-size: 16px; font-weight: 600">我的書籤</span>
+      </template>
+      <p style="color: #666; margin-bottom: 16px; font-size: 14px">
+        在 AI 對話中存下來的常用查詢。可以在這裡查看、刪除，或匯出分享給同事。
+      </p>
+      <el-button @click="router.push('/bookmarks')">前往我的書籤</el-button>
     </el-card>
   </div>
 </template>
