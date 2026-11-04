@@ -16,6 +16,10 @@ router = APIRouter(prefix="/api/ticket", tags=["ticket"])
 
 DEFAULT_TICKET_TTL_SECONDS = 300
 
+# 指的是管理員設定的帳號「到期時間」（User.expires_at），刻意不用「憑證」兩個字：
+# 跟 Azure AD client secret 過期（會帶 AADSTS7000222）容易搞混。
+EXPIRED_ACCOUNT_MESSAGE = "帳號使用期限已到，請聯絡管理員"
+
 
 def ticket_ttl_seconds() -> int:
     """ticket 效期（秒）。動態讀取而不是 module-level 常數，比照 `security._get_secret()`
@@ -89,7 +93,7 @@ def redeem_ticket(
     if not user.is_active:
         fail(403, "帳號已停用")
     if user.expires_at and user.expires_at < datetime.utcnow():
-        fail(403, "憑證已過期，請聯絡管理員")
+        fail(403, EXPIRED_ACCOUNT_MESSAGE)
 
     config = db.query(PbiConfig).filter(PbiConfig.id == ticket.pbi_config_id).first()
     if not config:

@@ -96,7 +96,9 @@ def activate_user(body: ActivateRequest, _=Depends(_require_admin_jwt), db: Sess
     if not user:
         raise HTTPException(status_code=404, detail="找不到使用者")
     user.is_active = body.is_active
-    if body.expires_at is not None:
+    # 要分辨「沒帶這個欄位」（不動）跟「明確帶 null」（清除到期時間）：
+    # 只看 `is not None` 的話，管理員在前端清空日期後儲存，舊的到期時間會原封不動留著。
+    if "expires_at" in body.model_fields_set:
         user.expires_at = body.expires_at
     db.commit()
     return {"message": f"{'開通' if body.is_active else '停用'} {body.email} 成功"}

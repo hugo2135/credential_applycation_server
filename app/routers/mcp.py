@@ -13,7 +13,7 @@ from app import bookmarks as bookmark_store
 from app.access_log import get_mcp_request_context, record_access
 from app.database import SessionLocal
 from app.models import AccessTicket, ModelChunk, PbiConfig, PersonalAccessToken, User, UserPbiConfig
-from app.routers.ticket import ticket_ttl_seconds
+from app.routers.ticket import EXPIRED_ACCOUNT_MESSAGE, ticket_ttl_seconds
 from app.security import generate_access_ticket, hash_opaque_token, verify_mcp_access_token
 
 
@@ -100,6 +100,10 @@ def _current_user(db) -> User:
         raise ToolError("使用者不存在")
     if not user.is_active:
         raise ToolError("帳號已停用，請聯絡管理員")
+    # 比照 legacy REST 與 ticket redeem：沒在這裡擋的話，過期使用者還能列模型、
+    # 領 ticket，要到腳本兌換時才失敗，離問題根源太遠、也看不出是哪一步出錯。
+    if user.expires_at and user.expires_at < datetime.utcnow():
+        raise ToolError(EXPIRED_ACCOUNT_MESSAGE)
     return user
 
 

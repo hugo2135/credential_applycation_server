@@ -226,6 +226,48 @@ async def test_azure_failure_on_redeem_is_recorded(
     assert "AADSTS7000215" in failed[0]["error"]
 
 
+def _set_expiry(client, admin_token, user_id, payload: dict):
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+    users_res = client.get("/api/admin/users", headers=admin_headers)
+    email = next(u["email"] for u in users_res.json() if u["id"] == user_id)
+    res = client.patch("/api/admin/users/activate", headers=admin_headers,
+                       json={"email": email, "is_active": True, **payload})
+    assert res.status_code == 200
+    users_res = client.get("/api/admin/users", headers=admin_headers)
+    return next(u for u in users_res.json() if u["id"] == user_id)
+
+
+@pytest.mark.anyio
+async def test_expired_account_is_blocked_at_mcp_tools(
+    live_server, client, admin_token, mcp_access_token,
+):
+    """到期的使用者在 MCP tool 就要被擋，不能等到腳本兌換 ticket 才失敗。"""
+    access_token, pbi_config_id, user_id = mcp_access_token
+    _set_credentials(client, admin_token, user_id)
+    past = (datetime.utcnow() - timedelta(days=1)).isoformat() + "Z"
+    _set_expiry(client, admin_token, user_id, {"expires_at": past})
+
+    async with streamablehttp_client(
+        f"{live_server}/mcp/",
+        headers={"Authorization": f"Bearer {access_token}"},
+    ) as (read_stream, write_stream, _):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            result = await session.call_tool("get_query_ticket", {"pbi_config_id": pbi_config_id})
+            assert result.isError
+            assert "使用期限" in result.content[0].text
+
+
+def test_admin_can_clear_account_expiry(client, admin_token, mcp_access_token):
+    """前端清空到期時間會送 null，必須真的清掉；沒帶這個欄位則維持原值。"""
+    _, _, user_id = mcp_access_token
+    future = (datetime.utcnow() + timedelta(days=30)).isoformat() + "Z"
+
+    assert _set_expiry(client, admin_token, user_id, {"expires_at": future})["expires_at"]
+    assert _set_expiry(client, admin_token, user_id, {})["expires_at"]  # 沒帶 → 不動
+    assert _set_expiry(client, admin_token, user_id, {"expires_at": None})["expires_at"] is None
+
+
 def test_unknown_ticket_is_not_recorded(client, admin_token):
     """查無此 ticket 不寫 log：端點不需登入，記下來等於讓任何人都能灌資料。"""
     admin_headers = {"Authorization": f"Bearer {admin_token}"}
