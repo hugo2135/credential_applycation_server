@@ -42,6 +42,7 @@ def record_access(
     method: str | None = None,
     ip_address: str | None = None,
     detail: str | None = None,
+    error: str | None = None,
 ) -> None:
     db.add(AccessLog(
         user_id=user_id,
@@ -51,5 +52,6 @@ def record_access(
         auth_method=auth_method,
         ip_address=ip_address,
         detail=detail,
+        error=error,
     ))
     db.commit()

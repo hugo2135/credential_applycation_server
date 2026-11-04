@@ -472,7 +472,7 @@ docker compose logs app -t | grep "ticket/redeem"
 
 注意來源 IP 一律顯示成 Caddy 的容器位址，**看不出請求從哪裡來**，所以不能靠 IP 判斷是誰打的。
 
-另外 `/admin/access-logs` 可以查到 `path = /mcp/get_query_ticket` 的紀錄，確認是**哪個帳號**領走了那張 ticket——當使用者有多個 MCP client、或懷疑連線綁到了別的帳號時，這是唯一的判斷依據。（兌換失敗目前不會寫入存取歷史，只有成功的才會。）
+另外 `/admin/access-logs` 可以查到 `path = /mcp/get_query_ticket` 的紀錄，確認是**哪個帳號**領走了那張 ticket——當使用者有多個 MCP client、或懷疑連線綁到了別的帳號時，這是唯一的判斷依據。兌換紀錄（`path = /api/ticket/redeem`，存取方式選「Ticket 兌換」）成功失敗都會留，失敗時「結果」欄會寫原因（ticket 已用過／過期、帳號停用、Azure AD 錯誤等）。唯一不留紀錄的是查無此 ticket（例如 ticket 字串被截斷），因為無法得知是誰。所以：有 `get_query_ticket` 卻**完全沒有**對應的兌換紀錄，就代表請求沒送到 server，問題在使用者端的權限或網路。
 
 ---
 

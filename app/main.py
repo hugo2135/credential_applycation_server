@@ -71,6 +71,7 @@ with engine.connect() as _conn:
         "ALTER TABLE user_pbi_configs ADD COLUMN check_status TEXT",
         "ALTER TABLE user_pbi_configs ADD COLUMN check_message TEXT",
         "ALTER TABLE user_pbi_configs ADD COLUMN checked_at DATETIME",
+        "ALTER TABLE access_logs ADD COLUMN error TEXT",
     ]:
         try:
             _conn.execute(text(_stmt))
@@ -141,14 +142,14 @@ async def lifespan(_: FastAPI):
 
 
 # 這個版號要跟 git tag 一致，改版時兩邊一起改（見 CLAUDE.md「版本管理」）。
-app = FastAPI(title="PBI Credential 申請程式", version="1.1", lifespan=lifespan)
+app = FastAPI(title="PBI Credential 申請程式", version="1.2", lifespan=lifespan)
 
 
 # OAuth/MCP 這幾條路徑本來就要給不特定第三方（使用者的瀏覽器、Claude 的伺服器）連，
 # 不可能限制在內網——安全性靠 OAuth 本身（PKCE + 登入 + 同意畫面）把關，不是靠 IP。
 # 其餘路徑（含 /admin/*、/auth/*）維持原本「僅限內網」的設計，不在這個排除清單內。
 # /api/ticket/ 也要豁免：那是給使用者機器／沙盒上的查詢腳本呼叫的，不可能在內網。
-# 安全性靠 ticket 本身（單次使用、60 秒過期、只存 hash），不是靠 IP。
+# 安全性靠 ticket 本身（單次使用、短效（預設 300 秒）、只存 hash），不是靠 IP。
 _IP_WHITELIST_EXEMPT_PREFIXES = ("/oauth/", "/.well-known/", "/mcp", "/api/ticket/")
 
 

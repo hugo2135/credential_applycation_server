@@ -176,4 +176,7 @@ class AccessLog(Base):
     # 該次操作的對象，目前放 pbi_config_id。Power BI 自己的 activity log 記的是執行
     # 查詢的 SP，兩邊要 join 還原「誰查了哪個模型」就得知道這次要的是哪個設定。
     detail = Column(String, nullable=True)
+    # null 代表成功。目前只有 ticket redeem 會記失敗：ticket 拿得到卻沒換到 token 時，
+    # 這是 server 端唯一能分辨「兌換失敗」跟「請求根本沒送到」的線索。
+    error = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)

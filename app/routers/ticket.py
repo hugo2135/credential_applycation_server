@@ -1,5 +1,6 @@
 import os
 from datetime import datetime
+from typing import NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -48,46 +49,67 @@ def redeem_ticket(
     這支端點刻意**不需要其他身份驗證**——ticket 本身就是憑證（單次使用、短效，
     DB 只存 hash）。它是給使用者機器／沙盒上的查詢腳本呼叫的，所以也必須列在
     `main.py` 的 IP 白名單豁免清單裡，否則設了 `ALLOWED_IPS` 的環境會一直 403。
+
+    成功與失敗都會寫進 access log（失敗時 `error` 欄位放原因），唯一例外是查無此
+    ticket：那種請求連是誰都不知道，而這支端點不需要登入，記下來等於讓任何人都能
+    往 DB 灌資料。
     """
     ticket = db.query(AccessTicket).filter(
         AccessTicket.token_hash == hash_opaque_token(body.ticket)
     ).first()
     if not ticket:
         raise HTTPException(status_code=401, detail="ticket 無效")
-    if ticket.used_at is not None:
-        raise HTTPException(status_code=401, detail="ticket 已使用過，請重新取得")
-    if ticket.expires_at < datetime.utcnow():
-        raise HTTPException(status_code=401, detail="ticket 已過期，請重新取得")
 
     user = db.query(User).filter(User.id == ticket.user_id).first()
+
+    def log(error: str | None = None) -> None:
+        record_access(
+            db,
+            user_id=user.id if user else ticket.user_id,
+            email=user.email if user else None,
+            auth_method="ticket",
+            path="/api/ticket/redeem",
+            method=request.method,
+            ip_address=client_ip(request),
+            detail=ticket.pbi_config_id,
+            error=error,
+        )
+
+    def fail(status_code: int, message: str) -> NoReturn:
+        log(message)
+        raise HTTPException(status_code=status_code, detail=message)
+
+    if ticket.used_at is not None:
+        fail(401, "ticket 已使用過，請重新取得")
+    if ticket.expires_at < datetime.utcnow():
+        fail(401, "ticket 已過期，請重新取得")
+
     if not user:
-        raise HTTPException(status_code=403, detail="使用者不存在")
+        fail(403, "使用者不存在")
     if not user.is_active:
-        raise HTTPException(status_code=403, detail="帳號已停用")
+        fail(403, "帳號已停用")
     if user.expires_at and user.expires_at < datetime.utcnow():
-        raise HTTPException(status_code=403, detail="憑證已過期，請聯絡管理員")
+        fail(403, "憑證已過期，請聯絡管理員")
 
     config = db.query(PbiConfig).filter(PbiConfig.id == ticket.pbi_config_id).first()
     if not config:
-        raise HTTPException(status_code=503, detail="PBI 設定不存在，請聯絡管理員")
+        fail(503, "PBI 設定不存在，請聯絡管理員")
 
     # 先標記已使用再去跟 Azure AD 換：就算換 token 失敗，這張 ticket 也不該還能重試，
     # 否則等於給了一個可以反覆打 Azure AD 的入口。使用者重新要一張即可。
     ticket.used_at = datetime.utcnow()
     db.commit()
 
-    result = acquire_powerbi_token(user)
+    try:
+        result = acquire_powerbi_token(user)
+    except HTTPException as e:
+        log(str(e.detail))
+        raise
+    except Exception as e:
+        log(f"換取 token 時發生未預期錯誤：{type(e).__name__}")
+        raise
 
-    record_access(
-        db,
-        user_id=user.id,
-        email=user.email,
-        auth_method="ticket",
-        path="/api/ticket/redeem",
-        method=request.method,
-        ip_address=client_ip(request),
-        detail=ticket.pbi_config_id,
-    )
+    log()
 
     # 不回傳 workspace_id/dataset_id：那兩個從 get_model_detail 拿，
     # 沿用既有設計，避免同一份靜態資料在兩個地方各回一次。

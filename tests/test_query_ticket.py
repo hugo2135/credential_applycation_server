@@ -173,4 +173,65 @@ async def test_redeem_is_recorded_in_access_logs(
     email = next(u["email"] for u in users_res.json() if u["id"] == user_id)
     logs = client.get("/api/admin/access-logs", headers=admin_headers,
                       params={"email": email, "auth_method": "ticket"}).json()
-    assert any(l["path"] == "/api/ticket/redeem" for l in logs)
+    assert any(l["path"] == "/api/ticket/redeem" and l["error"] is None for l in logs)
+
+
+def _ticket_logs(client, admin_token, user_id):
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+    users_res = client.get("/api/admin/users", headers=admin_headers)
+    email = next(u["email"] for u in users_res.json() if u["id"] == user_id)
+    return client.get("/api/admin/access-logs", headers=admin_headers,
+                      params={"email": email, "auth_method": "ticket"}).json()
+
+
+@pytest.mark.anyio
+async def test_failed_redeem_is_recorded_with_reason(
+    live_server, client, admin_token, mcp_access_token, fake_azure,
+):
+    """兌換失敗也要留紀錄，管理員才能分辨「換失敗」和「請求根本沒送到」。"""
+    access_token, pbi_config_id, user_id = mcp_access_token
+    _set_credentials(client, admin_token, user_id)
+    payload = await _issue_ticket(live_server, access_token, pbi_config_id)
+
+    assert client.post("/api/ticket/redeem", json={"ticket": payload["ticket"]}).status_code == 200
+    assert client.post("/api/ticket/redeem", json={"ticket": payload["ticket"]}).status_code == 401
+
+    failed = [l for l in _ticket_logs(client, admin_token, user_id) if l["error"]]
+    assert len(failed) == 1
+    assert "已使用過" in failed[0]["error"]
+    assert failed[0]["detail"] == pbi_config_id
+
+
+@pytest.mark.anyio
+async def test_azure_failure_on_redeem_is_recorded(
+    live_server, client, admin_token, mcp_access_token, monkeypatch,
+):
+    import app.routers.ticket as ticket_module
+    from fastapi import HTTPException
+
+    def failing_acquire(user):
+        raise HTTPException(status_code=502, detail="Azure AD 驗證失敗：AADSTS7000215")
+
+    monkeypatch.setattr(ticket_module, "acquire_powerbi_token", failing_acquire)
+
+    access_token, pbi_config_id, user_id = mcp_access_token
+    _set_credentials(client, admin_token, user_id)
+    payload = await _issue_ticket(live_server, access_token, pbi_config_id)
+
+    res = client.post("/api/ticket/redeem", json={"ticket": payload["ticket"]})
+    assert res.status_code == 502
+
+    failed = [l for l in _ticket_logs(client, admin_token, user_id) if l["error"]]
+    assert len(failed) == 1
+    assert "AADSTS7000215" in failed[0]["error"]
+
+
+def test_unknown_ticket_is_not_recorded(client, admin_token):
+    """查無此 ticket 不寫 log：端點不需登入，記下來等於讓任何人都能灌資料。"""
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+    before = client.get("/api/admin/access-logs", headers=admin_headers,
+                        params={"auth_method": "ticket"}).json()
+    assert client.post("/api/ticket/redeem", json={"ticket": "bogus"}).status_code == 401
+    after = client.get("/api/admin/access-logs", headers=admin_headers,
+                       params={"auth_method": "ticket"}).json()
+    assert len(after) == len(before)

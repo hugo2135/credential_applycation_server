@@ -1,7 +1,7 @@
 <template>
   <el-card>
     <el-alert type="info" :closable="false" style="margin-bottom: 16px">
-      <template #title>只保留最近 90 天的紀錄，涵蓋 /dashboard、/mcp、/mcp-tokens、/api 等有身份驗證的存取。</template>
+      <template #title>只保留最近 90 天的紀錄，涵蓋 /dashboard、/mcp、/mcp-tokens、/api 等有身份驗證的存取。Ticket 兌換失敗也會記錄（查無此 ticket 除外）；有 get_query_ticket 卻完全沒有對應的兌換紀錄，代表請求根本沒送到 server（通常是使用者端的權限或網路限制）。</template>
     </el-alert>
 
     <div style="display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap">
@@ -11,6 +11,7 @@
         <el-option label="OAuth (MCP)" value="oauth" />
         <el-option label="Personal Access Token" value="pat" />
         <el-option label="PBI_MASK_KEY (legacy)" value="mask_key" />
+        <el-option label="Ticket 兌換" value="ticket" />
       </el-select>
       <el-date-picker
         v-model="filters.range"
@@ -36,6 +37,13 @@
         </template>
       </el-table-column>
       <el-table-column prop="path" label="路徑" min-width="160" />
+      <el-table-column label="結果" min-width="160">
+        <template #default="{ row }">
+          <el-tag v-if="row.error" size="small" type="danger">失敗</el-tag>
+          <span v-if="row.error" style="margin-left: 6px; font-size: 12px; color: #c45656">{{ row.error }}</span>
+          <el-tag v-else size="small" type="success">成功</el-tag>
+        </template>
+      </el-table-column>
       <el-table-column label="對象 PBI 設定" min-width="140">
         <template #default="{ row }">{{ row.detail ? configName(row.detail) : '—' }}</template>
       </el-table-column>
@@ -67,6 +75,7 @@ interface AccessLog {
   auth_method: string
   ip_address: string | null
   detail: string | null
+  error: string | null
   created_at: string
 }
 
@@ -90,12 +99,14 @@ const authMethodLabels: Record<string, string> = {
   oauth: 'OAuth (MCP)',
   pat: 'PAT',
   mask_key: 'PBI_MASK_KEY',
+  ticket: 'Ticket 兌換',
 }
 const authMethodTags: Record<string, string> = {
   user_session: 'success',
   oauth: 'primary',
   pat: 'warning',
   mask_key: 'info',
+  ticket: 'primary',
 }
 
 function authMethodLabel(m: string) {
