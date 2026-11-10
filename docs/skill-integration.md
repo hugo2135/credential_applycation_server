@@ -113,6 +113,7 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
     {
       "table": "Orders",
       "column": "region",
+      "aliases": ["地區", "區域"],
       "values": [
         { "value": "North", "aliases": ["北區", "北部"] },
         { "value": "South", "aliases": ["南區", "南部"] }
@@ -152,6 +153,8 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
 **`mode_id` 對回應內容的影響**：帶了 `mode_id` 時，`tables` 只會回該模式設定的表名子集（該模式沒設 `tables` 則不限制、回全部）；同時 `filters` 陣列裡會多一筆 `filterId` 是 `mode:<mode_id>` 的 `alwaysApply` 設定檔，內容是該模式自己的篩選規則——**照上面同一套比對邏輯處理即可，不用特別區分**。
 
 **`column_aliases` 的使用方式**：這不受 `mode_id` 影響，固定回傳整個 PBI 設定的欄位別名對照。生成 DAX 前，先掃描使用者的需求文字，如果提到某個 `aliases` 裡的詞（例如「北部」），比對邏輯上就把它當成對應的 `value`（例如 `"North"`）寫進 DAX 篩選條件，而不是直接把使用者的原始用詞當成欄位值——這樣可以避免 DAX 因為值不存在資料裡而查不到結果。沒有比對到任何別名時，正常使用使用者的原始用詞即可。
+
+**欄位本身的別名（v1.5 新增）**：每組另外有一個 `aliases`（跟 `values[].aliases` 不同層），是**欄位本身**的其他說法。使用者提到這些詞（例如「各地區的銷售」裡的「地區」）時，把它當成在指 `table[column]` 這個欄位（例如 `Orders[region]`），用來決定分組、篩選或輸出哪個欄位，而不是自己去猜欄位名稱。這個 key 一定存在，沒設定時是空陣列；同一組也可能只設欄位別名、`values` 是空陣列。舊版 skill 不讀這個欄位也不會壞，只是用不到這項對照。
 
 ### `get_query_ticket`
 

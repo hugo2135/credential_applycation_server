@@ -58,7 +58,7 @@ async def test_config_edits_are_not_masked_by_cache(live_server, client, admin_t
         "alwaysApply": True, "overrideDefaults": False, "contextKeywords": [],
         "filters": [{"description": "排除退貨單", "expression": 'Orders[t] <> "r"', "requiredTable": None}],
     }]
-    new_aliases = [{"table": "TestTable", "column": "region",
+    new_aliases = [{"table": "TestTable", "column": "region", "aliases": [],
                     "values": [{"value": "North", "aliases": ["北區"]}]}]
     res = client.patch(f"/api/admin/pbi-configs/{pbi_config_id}", headers=headers, json={
         "filters": new_filters,

@@ -18,7 +18,7 @@ SAMPLE_QUERY_MODES = [
     {"mode_id": "summary", "name": "摘要模式", "description": None, "tables": ["TestTable"], "filters": []}
 ]
 SAMPLE_COLUMN_ALIASES = [
-    {"table": "TestTable", "column": "region", "values": [{"value": "North", "aliases": ["北區"]}]}
+    {"table": "TestTable", "column": "region", "aliases": [], "values": [{"value": "North", "aliases": ["北區"]}]}
 ]
 
 
@@ -115,7 +115,7 @@ def test_batch_update_pbi_configs_only_touches_specified_fields(client, admin_to
     id_a = _create_config_with_model(client, headers, f"batch-a-{uuid.uuid4().hex[:8]}")
     id_b = _create_config_with_model(client, headers, f"batch-b-{uuid.uuid4().hex[:8]}")
 
-    new_aliases = [{"table": "TestTable", "column": "region", "values": [{"value": "South", "aliases": ["南區"]}]}]
+    new_aliases = [{"table": "TestTable", "column": "region", "aliases": [], "values": [{"value": "South", "aliases": ["南區"]}]}]
     res = client.patch("/api/admin/pbi-configs/batch-update", headers=headers, json={
         "config_ids": [id_a, id_b],
         "workspace_id": "ws-shared",

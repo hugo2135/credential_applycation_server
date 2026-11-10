@@ -144,7 +144,7 @@
     </el-tab-pane>
 
     <!-- 篩選規則 -->
-    <el-tab-pane label="篩選規則" name="filters">
+    <el-tab-pane :label="tabLabel('篩選規則', filtersSection)" name="filters">
       <el-alert type="info" :closable="false" style="margin-bottom: 12px">
         <template #title>
           AI 產生查詢時自動加上的條件。分兩種：<b>預設篩選</b>每次查詢都會加（例如一律排除退貨單、測試資料）；
@@ -157,7 +157,7 @@
     </el-tab-pane>
 
     <!-- 查詢模式 -->
-    <el-tab-pane label="查詢模式" name="query-modes">
+    <el-tab-pane :label="tabLabel('查詢模式', queryModesSection)" name="query-modes">
       <el-alert type="info" :closable="false" style="margin-bottom: 12px">
         <template #title>
           限制這份設定能查的資料範圍。設了多個模式時，AI 會在查詢前請使用者選一個；沒設定就是整個模型都能查。
@@ -170,11 +170,12 @@
     </el-tab-pane>
 
     <!-- 篩選欄位別名 -->
-    <el-tab-pane label="篩選欄位別名" name="column-aliases">
+    <el-tab-pane :label="tabLabel('篩選欄位別名', columnAliasesSection)" name="column-aliases">
       <el-alert type="info" :closable="false" style="margin-bottom: 12px">
         <template #title>
-          把使用者的日常說法對應到資料裡實際存的值。例如使用者說「北部」，但資料裡存的是 <code>North</code>，
-          設定後 AI 會自動換成 <code>North</code> 去查，避免因為值對不上而查不到資料。
+          把使用者的日常說法對應到模型裡實際的名稱，可以設兩種：<b>欄位的其他說法</b>（使用者說「地區」，指的是
+          <code>region</code> 欄位），以及<b>欄位值的對照</b>（使用者說「北部」，資料裡存的是 <code>North</code>）。
+          設定後 AI 會換成正確的名稱去查，避免找錯欄位或因為值對不上而查不到資料。
         </template>
       </el-alert>
       <SectionShell :section="columnAliasesSection" :schema-hint="schemaHint">
@@ -202,9 +203,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type { UploadFile } from 'element-plus'
 import http from '@/api/http'
 import { formatDate } from '@/utils/date'
@@ -354,6 +355,7 @@ const columnAliasesSection = useConfigSection<ColumnAliasGroup>({
   clean: (g) => ({
     table: g.table.trim(),
     column: g.column.trim(),
+    aliases: g.aliases,
     values: g.values.map((v) => ({ value: v.value.trim(), aliases: v.aliases })),
   }),
   validate: (items) => {
@@ -361,6 +363,7 @@ const columnAliasesSection = useConfigSection<ColumnAliasGroup>({
     items.forEach((g, i) => {
       const label = g.table && g.column ? `${g.table}[${g.column}]` : `第 ${i + 1} 個欄位`
       if (!g.table.trim() || !g.column.trim()) errors.push(`${label}沒有選擇資料表或欄位`)
+      if (!g.aliases.length && !g.values.length) errors.push(`${label}沒有填欄位的其他說法，也沒有任何值的對照`)
       g.values.forEach((v, j) => {
         if (!v.value.trim()) errors.push(`${label}第 ${j + 1} 個值沒有填「資料裡實際存的值」`)
       })
@@ -369,6 +372,37 @@ const columnAliasesSection = useConfigSection<ColumnAliasGroup>({
   },
   onSaved: () => load(),
 })
+
+const sections = [filtersSection, queryModesSection, columnAliasesSection]
+
+function tabLabel(label: string, section: { dirty: { value: boolean } }) {
+  return section.dirty.value ? `${label} ●` : label
+}
+
+function hasUnsaved() {
+  return sections.some((s) => s.dirty.value)
+}
+
+onBeforeRouteLeave(async () => {
+  if (!hasUnsaved()) return true
+  try {
+    await ElMessageBox.confirm('篩選規則／查詢模式／欄位別名有修改還沒儲存，離開後這些修改會遺失。', '尚未儲存', {
+      confirmButtonText: '放棄修改並離開',
+      cancelButtonText: '留在這頁',
+      type: 'warning',
+    })
+    return true
+  } catch {
+    return false
+  }
+})
+
+// 關分頁、重新整理這種不經過 Vue Router 的離開，只能用瀏覽器內建的確認框
+function onBeforeUnload(e: BeforeUnloadEvent) {
+  if (hasUnsaved()) e.preventDefault()
+}
+onMounted(() => window.addEventListener('beforeunload', onBeforeUnload))
+onBeforeUnmount(() => window.removeEventListener('beforeunload', onBeforeUnload))
 
 async function load() {
   loading.value = true

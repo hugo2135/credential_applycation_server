@@ -24,6 +24,7 @@ SAMPLE_COLUMN_ALIASES = [
     {
         "table": "TestTable",
         "column": "region",
+        "aliases": [],
         "values": [
             {"value": "North", "aliases": ["北區", "北部"]},
             {"value": "South", "aliases": ["南區", "南部"]},

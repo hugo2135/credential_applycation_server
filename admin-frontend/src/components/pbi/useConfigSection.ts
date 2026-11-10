@@ -1,4 +1,4 @@
-import { reactive } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import http from '@/api/http'
 
@@ -27,9 +27,17 @@ export function useConfigSection<T>(opts: SectionOptions<T>) {
     saving: false,
   })
 
+  // 最後一次從後端載入的內容，跟目前畫面比對來判斷有沒有未儲存的修改。
+  // 表單改完沒按儲存就離開（例如跑去複製設定），內容會整個不見，而且很難察覺。
+  const saved = ref('')
+  const dirty = computed(() =>
+    state.jsonMode ? state.text.trim() !== saved.value.trim() : toText() !== saved.value,
+  )
+
   function load(raw: unknown[] | null | undefined) {
     state.items = (raw ?? []).map(opts.normalize) as any
     state.text = toText()
+    saved.value = state.text
     state.errors = []
   }
 
@@ -88,7 +96,7 @@ export function useConfigSection<T>(opts: SectionOptions<T>) {
     }
   }
 
-  return { state, load, setJsonMode, save }
+  return { state, dirty, load, setJsonMode, save }
 }
 
 export function duplicates(values: string[]) {

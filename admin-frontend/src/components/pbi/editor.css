@@ -20,6 +20,11 @@
   font-size: 12px;
   color: var(--el-text-color-secondary);
 }
+.sub-label {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
 .item-body {
   padding: 8px 4px 0;
 }

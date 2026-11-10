@@ -434,6 +434,9 @@ class ColumnValueAlias(BaseModel):
 class ColumnAliasGroup(BaseModel):
     table: str
     column: str
+    # 欄位本身的其他說法（例如 region → 地區、區域），跟 values 裡「欄位值」的別名是兩回事；
+    # v1.5 新增，舊資料沒有這個 key 時視為空陣列
+    aliases: list[str] = []
     values: list[ColumnValueAlias] = []
 
 

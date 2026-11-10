@@ -299,7 +299,8 @@ def get_mcp_server() -> FastMCP:
                 "dataset_id": config.dataset_id,
                 "query_mode_id": mode_id,
                 "filters": filters,
-                "column_aliases": config.column_aliases or [],
+                # v1.5 起每組都有欄位本身的 aliases，舊資料沒有這個 key，補成空陣列讓 skill 端不用判斷
+                "column_aliases": [{**g, "aliases": g.get("aliases") or []} for g in (config.column_aliases or [])],
                 "relationships": relationships,
                 "tables": tables,
             }

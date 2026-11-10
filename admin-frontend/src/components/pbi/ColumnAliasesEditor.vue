@@ -13,7 +13,9 @@
             <div class="item-title">
               <span>
                 <b>{{ g.table && g.column ? `${g.table}[${g.column}]` : '（尚未選擇欄位）' }}</b>
-                <span class="summary">{{ g.values.length }} 個值</span>
+                <span class="summary">
+                  <template v-if="g.aliases.length">又稱：{{ g.aliases.join('、') }}・</template>{{ g.values.length }} 個值
+                </span>
               </span>
               <span @click.stop>
                 <el-popconfirm title="確定刪除這個欄位的別名？" confirm-button-type="danger" @confirm="model.splice(i, 1)">
@@ -48,6 +50,13 @@
               </el-select>
             </div>
 
+            <div class="sub-label">這個欄位的其他說法</div>
+            <TagInput v-model="g.aliases" placeholder="例：地區、區域，輸入後按 Enter" />
+            <div class="hint" style="margin-bottom: 16px">
+              使用者用這些詞指稱這個欄位時，AI 會知道是在說它。例：使用者問「各地區的銷售」，AI 會用這個欄位分組。
+            </div>
+
+            <div class="sub-label">欄位值的對照</div>
             <el-table :data="g.values" border size="small">
               <el-table-column label="資料裡實際存的值" width="240">
                 <template #default="{ row }">
@@ -74,7 +83,7 @@
       </el-collapse>
     </template>
 
-    <el-button type="primary" plain @click="add({ table: '', column: '', values: [{ value: '', aliases: [] }] })">
+    <el-button type="primary" plain @click="add({ table: '', column: '', aliases: [], values: [] })">
       ＋ 新增欄位
     </el-button>
   </div>

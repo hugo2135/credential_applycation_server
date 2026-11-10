@@ -33,6 +33,8 @@ export interface ColumnValueAlias {
 export interface ColumnAliasGroup {
   table: string
   column: string
+  /** 欄位本身的其他說法（v1.5 新增），跟 values[].aliases（欄位值的說法）不同 */
+  aliases: string[]
   values: ColumnValueAlias[]
 }
 
@@ -87,6 +89,7 @@ export function normalizeAliasGroup(g: Partial<ColumnAliasGroup>): ColumnAliasGr
   return {
     table: g.table ?? '',
     column: g.column ?? '',
+    aliases: g.aliases ?? [],
     values: (g.values ?? []).map((v) => ({ value: v.value ?? '', aliases: v.aliases ?? [] })),
   }
 }
