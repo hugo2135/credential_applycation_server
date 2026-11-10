@@ -493,6 +493,25 @@ def get_pbi_config(config_id: str, _=Depends(_require_admin_jwt), db: Session = 
     return _pbi_config_dict(config)
 
 
+@router.get("/pbi-configs/{config_id}/schema")
+def get_pbi_config_schema(config_id: str, _=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
+    """最新一版語意模型的表名與欄位名，給詳情頁的篩選規則／查詢模式／欄位別名表單做下拉選單。
+    還沒上傳模型時回空清單，前端退回手動輸入。"""
+    if not db.query(PbiConfig.id).filter(PbiConfig.id == config_id).first():
+        raise HTTPException(status_code=404, detail="找不到 PBI 設定")
+    chunk = (
+        db.query(ModelChunk)
+        .filter(ModelChunk.pbi_config_id == config_id)
+        .order_by(ModelChunk.model_version.desc())
+        .first()
+    )
+    tables = []
+    for t in (chunk.tables or []) if chunk else []:
+        columns = [c.get("column") for c in t.get("columns", []) if c.get("column")]
+        tables.append({"table": t.get("table"), "columns": columns})
+    return {"model_version": chunk.model_version if chunk else None, "tables": tables}
+
+
 @router.post("/pbi-configs", status_code=201)
 def create_pbi_config(body: PbiConfigCreate, _=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
     if db.query(PbiConfig).filter(PbiConfig.name == body.name).first():

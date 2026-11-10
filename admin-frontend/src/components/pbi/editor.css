@@ -1,0 +1,32 @@
+.toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+.items {
+  margin-bottom: 16px;
+}
+.item-title {
+  flex: 1;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-right: 8px;
+  min-width: 0;
+}
+.item-title .summary {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.item-body {
+  padding: 8px 4px 0;
+}
+.hint {
+  width: 100%;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
+  margin-top: 4px;
+}

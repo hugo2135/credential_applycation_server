@@ -147,86 +147,39 @@
     <el-tab-pane label="篩選規則" name="filters">
       <el-alert type="info" :closable="false" style="margin-bottom: 12px">
         <template #title>
-          JSON 陣列，每筆一個篩選設定檔（filterId/name/alwaysApply/overrideDefaults/contextKeywords/filters）。
-          Skill 透過 get_model_detail 取得，格式說明見 docs/skill-integration.md。
+          AI 產生查詢時自動加上的條件。分兩種：<b>預設篩選</b>每次查詢都會加（例如一律排除退貨單、測試資料）；
+          <b>情境篩選</b>只在使用者的問題提到特定關鍵字時才加（例如提到「退貨」時改成只看退貨單）。
         </template>
       </el-alert>
-      <el-input
-        v-model="filtersText"
-        type="textarea"
-        :rows="16"
-        style="font-family: monospace; font-size: 12px"
-        placeholder='[
-  {
-    "filterId": "exclude-return-orders",
-    "name": "排除退貨單",
-    "description": "預設查詢排除退貨訂單",
-    "alwaysApply": true,
-    "overrideDefaults": false,
-    "contextKeywords": [],
-    "filters": [
-      { "description": "排除退貨單", "expression": "Orders[order_type] <> \"return_order\"" }
-    ]
-  }
-]'
-      />
-      <div v-if="filtersError" style="color: #f56c6c; font-size: 13px; margin-top: 8px">{{ filtersError }}</div>
-      <el-button type="primary" :loading="filtersSaving" style="margin-top: 12px" @click="saveFilters">儲存</el-button>
+      <SectionShell :section="filtersSection" :schema-hint="schemaHint">
+        <FilterProfilesEditor v-model="filtersSection.state.items" :tables="tableNames" />
+      </SectionShell>
     </el-tab-pane>
 
     <!-- 查詢模式 -->
     <el-tab-pane label="查詢模式" name="query-modes">
       <el-alert type="info" :closable="false" style="margin-bottom: 12px">
         <template #title>
-          JSON 陣列，每筆一個資料曝光範圍模式（mode_id/name/description/tables/filters）。tables 是語意模型裡的表名子集，
-          留空代表不限制；filters 會疊加在「篩選規則」比對出來的結果之上。存取限制沿用既有的 PBI 設定指派機制。
+          限制這份設定能查的資料範圍。設了多個模式時，AI 會在查詢前請使用者選一個；沒設定就是整個模型都能查。
+          要讓不同部門看不同範圍，請建立多份 PBI 設定分別指派，而不是在同一份設定裡用模式區隔。
         </template>
       </el-alert>
-      <el-input
-        v-model="queryModesText"
-        type="textarea"
-        :rows="16"
-        style="font-family: monospace; font-size: 12px"
-        placeholder='[
-  {
-    "mode_id": "summary",
-    "name": "摘要模式",
-    "description": "只看高階彙總表",
-    "tables": ["Sales", "Product"],
-    "filters": []
-  }
-]'
-      />
-      <div v-if="queryModesError" style="color: #f56c6c; font-size: 13px; margin-top: 8px">{{ queryModesError }}</div>
-      <el-button type="primary" :loading="queryModesSaving" style="margin-top: 12px" @click="saveQueryModes">儲存</el-button>
+      <SectionShell :section="queryModesSection" :schema-hint="schemaHint">
+        <QueryModesEditor v-model="queryModesSection.state.items" :tables="tableNames" />
+      </SectionShell>
     </el-tab-pane>
 
     <!-- 篩選欄位別名 -->
     <el-tab-pane label="篩選欄位別名" name="column-aliases">
       <el-alert type="info" :closable="false" style="margin-bottom: 12px">
         <template #title>
-          JSON 陣列，每筆對應一個重點欄位（table/column/values），values 是該欄位可能的值跟使用者可能會用的別名，
-          讓 Skill 把自然語言用詞轉換成實際存在 Power BI 裡的欄位值。
+          把使用者的日常說法對應到資料裡實際存的值。例如使用者說「北部」，但資料裡存的是 <code>North</code>，
+          設定後 AI 會自動換成 <code>North</code> 去查，避免因為值對不上而查不到資料。
         </template>
       </el-alert>
-      <el-input
-        v-model="columnAliasesText"
-        type="textarea"
-        :rows="16"
-        style="font-family: monospace; font-size: 12px"
-        placeholder='[
-  {
-    "table": "Orders",
-    "column": "region",
-    "values": [
-      { "value": "North", "aliases": ["北區", "北部"] },
-      { "value": "South", "aliases": ["南區", "南部"] }
-    ]
-  }
-]'
-      />
-      <div v-if="columnAliasesError" style="color: #f56c6c; font-size: 13px; margin-top: 8px">{{ columnAliasesError }}</div>
-      <el-button type="primary" :loading="columnAliasesSaving" style="margin-top: 12px" @click="saveColumnAliases">儲存</el-button>
+      <SectionShell :section="columnAliasesSection" :schema-hint="schemaHint">
+        <ColumnAliasesEditor v-model="columnAliasesSection.state.items" :tables="schemaTables" />
+      </SectionShell>
     </el-tab-pane>
   </el-tabs>
 
@@ -249,12 +202,28 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { UploadFile } from 'element-plus'
 import http from '@/api/http'
 import { formatDate } from '@/utils/date'
+import SectionShell from '@/components/pbi/SectionShell.vue'
+import FilterProfilesEditor from '@/components/pbi/FilterProfilesEditor.vue'
+import QueryModesEditor from '@/components/pbi/QueryModesEditor.vue'
+import ColumnAliasesEditor from '@/components/pbi/ColumnAliasesEditor.vue'
+import { duplicates, useConfigSection } from '@/components/pbi/useConfigSection'
+import {
+  cleanRule,
+  normalizeAliasGroup,
+  normalizeMode,
+  normalizeProfile,
+  type ColumnAliasGroup,
+  type FilterProfile,
+  type FilterRule,
+  type QueryMode,
+  type SchemaTable,
+} from '@/components/pbi/types'
 
 interface PbiConfig {
   id: string
@@ -292,17 +261,114 @@ const config = ref<PbiConfig | null>(null)
 const basicForm = ref({ workspace_id: '', dataset_id: '' })
 const basicSaving = ref(false)
 
-const filtersText = ref('')
-const filtersError = ref('')
-const filtersSaving = ref(false)
+// 表名／欄位名下拉選單的來源（最新一版語意模型），還沒上傳模型時退回手動輸入
+const schemaTables = ref<SchemaTable[]>([])
+const tableNames = computed(() => schemaTables.value.map((t) => t.table))
+const schemaHint = computed(() =>
+  schemaTables.value.length ? '' : '尚未上傳語意模型，資料表與欄位需要手動輸入名稱。',
+)
 
-const queryModesText = ref('')
-const queryModesError = ref('')
-const queryModesSaving = ref(false)
+async function loadSchema() {
+  try {
+    const { data } = await http.get(`/pbi-configs/${configId}/schema`)
+    schemaTables.value = data.tables
+  } catch {
+    // 下拉選單只是輔助，抓不到就讓管理員手動輸入
+  }
+}
 
-const columnAliasesText = ref('')
-const columnAliasesError = ref('')
-const columnAliasesSaving = ref(false)
+function ruleErrors(prefix: string, rules: FilterRule[]) {
+  return rules.flatMap((r, j) =>
+    r.expression.trim() ? [] : [`${prefix}第 ${j + 1} 條篩選條件沒有填 DAX 運算式`],
+  )
+}
+
+const filtersSection = useConfigSection<FilterProfile>({
+  configId,
+  field: 'filters',
+  label: '篩選規則',
+  normalize: normalizeProfile,
+  clean: (p) => ({
+    filterId: p.filterId.trim(),
+    name: p.name.trim(),
+    ...(p.description?.trim() ? { description: p.description.trim() } : {}),
+    alwaysApply: p.alwaysApply,
+    // 「每次都套用」的規則用不到這兩個欄位，存成預設值，免得留下切換前的殘值造成誤會
+    overrideDefaults: p.alwaysApply ? false : p.overrideDefaults,
+    contextKeywords: p.alwaysApply ? [] : p.contextKeywords,
+    filters: p.filters.map(cleanRule),
+  }),
+  validate: (items) => {
+    const errors: string[] = []
+    items.forEach((p, i) => {
+      const label = `「${p.name || `第 ${i + 1} 組`}」`
+      if (!p.name.trim()) errors.push(`第 ${i + 1} 組規則沒有填名稱`)
+      if (!p.filterId.trim()) errors.push(`${label}的 filterId 是空的，請切到 JSON 模式修改`)
+      if (!p.alwaysApply && !p.contextKeywords.length) {
+        errors.push(`${label}設定成「提到關鍵字才套用」，但沒有填任何觸發關鍵字，永遠不會生效`)
+      }
+      if (!p.filters.length) errors.push(`${label}沒有任何篩選條件`)
+      errors.push(...ruleErrors(label, p.filters))
+    })
+    for (const d of duplicates(items.map((p) => p.filterId.trim()))) {
+      errors.push(`filterId「${d}」重複了，請切到 JSON 模式修改`)
+    }
+    return errors
+  },
+  onSaved: () => load(),
+})
+
+const queryModesSection = useConfigSection<QueryMode>({
+  configId,
+  field: 'query_modes',
+  label: '查詢模式',
+  normalize: normalizeMode,
+  clean: (m) => ({
+    mode_id: m.mode_id.trim(),
+    name: m.name.trim(),
+    ...(m.description?.trim() ? { description: m.description.trim() } : {}),
+    tables: m.tables,
+    filters: m.filters.map(cleanRule),
+  }),
+  validate: (items) => {
+    const errors: string[] = []
+    items.forEach((m, i) => {
+      const label = `「${m.name || `第 ${i + 1} 個模式`}」`
+      if (!m.name.trim()) errors.push(`第 ${i + 1} 個模式沒有填名稱`)
+      if (!m.mode_id.trim()) errors.push(`${label}的 mode_id 是空的，請切到 JSON 模式修改`)
+      errors.push(...ruleErrors(label, m.filters))
+    })
+    for (const d of duplicates(items.map((m) => m.mode_id.trim()))) {
+      errors.push(`mode_id「${d}」重複了，請切到 JSON 模式修改`)
+    }
+    return errors
+  },
+  onSaved: () => load(),
+})
+
+const columnAliasesSection = useConfigSection<ColumnAliasGroup>({
+  configId,
+  field: 'column_aliases',
+  label: '篩選欄位別名',
+  normalize: normalizeAliasGroup,
+  clean: (g) => ({
+    table: g.table.trim(),
+    column: g.column.trim(),
+    values: g.values.map((v) => ({ value: v.value.trim(), aliases: v.aliases })),
+  }),
+  validate: (items) => {
+    const errors: string[] = []
+    items.forEach((g, i) => {
+      const label = g.table && g.column ? `${g.table}[${g.column}]` : `第 ${i + 1} 個欄位`
+      if (!g.table.trim() || !g.column.trim()) errors.push(`${label}沒有選擇資料表或欄位`)
+      g.values.forEach((v, j) => {
+        if (!v.value.trim()) errors.push(`${label}第 ${j + 1} 個值沒有填「資料裡實際存的值」`)
+      })
+    })
+    return errors
+  },
+  onSaved: () => load(),
+})
 
 async function load() {
   loading.value = true
@@ -310,9 +376,9 @@ async function load() {
     const { data } = await http.get(`/pbi-configs/${configId}`)
     config.value = data
     basicForm.value = { workspace_id: data.workspace_id ?? '', dataset_id: data.dataset_id ?? '' }
-    filtersText.value = data.filters?.length ? JSON.stringify(data.filters, null, 2) : ''
-    queryModesText.value = data.query_modes?.length ? JSON.stringify(data.query_modes, null, 2) : ''
-    columnAliasesText.value = data.column_aliases?.length ? JSON.stringify(data.column_aliases, null, 2) : ''
+    filtersSection.load(data.filters)
+    queryModesSection.load(data.query_modes)
+    columnAliasesSection.load(data.column_aliases)
   } catch {
     ElMessage.error('無法載入 PBI 設定')
   } finally {
@@ -330,86 +396,6 @@ async function saveBasic() {
     ElMessage.error(e.response?.data?.detail ?? '儲存失敗')
   } finally {
     basicSaving.value = false
-  }
-}
-
-function parseJsonArray(text: string, label: string): unknown[] | null {
-  if (!text.trim()) return []
-  try {
-    const parsed = JSON.parse(text)
-    if (!Array.isArray(parsed)) throw new Error()
-    return parsed
-  } catch {
-    throw new Error(`${label}格式錯誤，最外層必須是 JSON 陣列`)
-  }
-}
-
-async function saveFilters() {
-  filtersError.value = ''
-  let filters: unknown[]
-  try {
-    filters = parseJsonArray(filtersText.value, '篩選規則') ?? []
-  } catch (e: any) {
-    filtersError.value = e.message
-    return
-  }
-  filtersSaving.value = true
-  try {
-    await http.patch(`/pbi-configs/${configId}`, { filters })
-    ElMessage.success('篩選規則已儲存')
-    await load()
-  } catch (e: any) {
-    filtersError.value = e.response?.data?.detail
-      ? (typeof e.response.data.detail === 'string' ? e.response.data.detail : JSON.stringify(e.response.data.detail))
-      : '儲存失敗'
-  } finally {
-    filtersSaving.value = false
-  }
-}
-
-async function saveQueryModes() {
-  queryModesError.value = ''
-  let queryModes: unknown[]
-  try {
-    queryModes = parseJsonArray(queryModesText.value, '查詢模式') ?? []
-  } catch (e: any) {
-    queryModesError.value = e.message
-    return
-  }
-  queryModesSaving.value = true
-  try {
-    await http.patch(`/pbi-configs/${configId}`, { query_modes: queryModes })
-    ElMessage.success('查詢模式已儲存')
-    await load()
-  } catch (e: any) {
-    queryModesError.value = e.response?.data?.detail
-      ? (typeof e.response.data.detail === 'string' ? e.response.data.detail : JSON.stringify(e.response.data.detail))
-      : '儲存失敗'
-  } finally {
-    queryModesSaving.value = false
-  }
-}
-
-async function saveColumnAliases() {
-  columnAliasesError.value = ''
-  let columnAliases: unknown[]
-  try {
-    columnAliases = parseJsonArray(columnAliasesText.value, '篩選欄位別名') ?? []
-  } catch (e: any) {
-    columnAliasesError.value = e.message
-    return
-  }
-  columnAliasesSaving.value = true
-  try {
-    await http.patch(`/pbi-configs/${configId}`, { column_aliases: columnAliases })
-    ElMessage.success('篩選欄位別名已儲存')
-    await load()
-  } catch (e: any) {
-    columnAliasesError.value = e.response?.data?.detail
-      ? (typeof e.response.data.detail === 'string' ? e.response.data.detail : JSON.stringify(e.response.data.detail))
-      : '儲存失敗'
-  } finally {
-    columnAliasesSaving.value = false
   }
 }
 
@@ -468,7 +454,7 @@ async function handleUpload() {
     fileName.value = ''
     fileList.value = []
     rawJson.value = ''
-    await loadVersions()
+    await Promise.all([loadVersions(), loadSchema()])
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail ?? '上傳失敗')
   } finally {
@@ -552,14 +538,13 @@ async function deleteVersion(row: Version) {
     await http.delete(`/model/versions/${row.id}`)
     ElMessage.success(`版本 ${row.model_version} 已刪除`)
     delete versionDetails.value[row.id]
-    await loadVersions()
+    await Promise.all([loadVersions(), loadSchema()])
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail ?? '刪除失敗')
   }
 }
 
 onMounted(async () => {
-  await load()
-  await loadVersions()
+  await Promise.all([load(), loadVersions(), loadSchema()])
 })
 </script>

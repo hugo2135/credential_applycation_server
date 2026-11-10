@@ -153,6 +153,9 @@ docs/
 /admin/users            使用者管理（管理員）
 /admin/pbi-configs      PBI 設定列表（管理員，僅建立/刪除）
 /admin/pbi-configs/:id  PBI 設定詳情（管理員，Tab：基本設定/語意模型版本/篩選規則/查詢模式/篩選欄位別名，一站式管理，取代原本獨立的 /admin/model）
+                        後三個 Tab 預設是表單（admin-frontend/src/components/pbi/），可切換「以 JSON 編輯」；表名/欄位下拉來自
+                        GET /api/admin/pbi-configs/{id}/schema（最新一版模型）。畫面上的中文名稱可隨意改，JSON key 是 skill 契約不能動
+
 /admin/access-logs      存取歷史查詢／匯出（管理員）
 ```
 
