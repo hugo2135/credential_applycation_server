@@ -18,6 +18,11 @@ class PbiConfig(Base):
     filters = Column(JSON, nullable=True)  # list[dict]，篩選設定檔（filterId/name/alwaysApply/...）
     query_modes = Column(JSON, nullable=True)  # list[dict]，資料曝光範圍模式（mode_id/name/tables/filters）
     column_aliases = Column(JSON, nullable=True)  # list[dict]，重點欄位的別名對照（table/column/aliases（欄位本身）/values[{value,aliases}]（欄位值））
+    # MCP／legacy API 提供哪一版語意模型；None 代表跟隨最新版（見 app/model_versions.py）
+    active_model_version = Column(Integer, nullable=True)
+    # 用過的最大版本號。版本號只增不減、刪掉的號碼不再使用——get_model_detail 的快取與
+    # 書籤的 possibly_outdated 都假設「同一個版本號的內容永遠不變」
+    last_model_version = Column(Integer, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
@@ -63,6 +68,8 @@ class ModelChunk(Base):
     name = Column(String, nullable=True)
     pbi_config_id = Column(String, ForeignKey("pbi_config.id"), nullable=True, index=True)
     model_description = Column(Text, nullable=True)
+    # 由「刪除表／欄位／量值並另存新版本」產生時，記下來源版本號；直接上傳的是 None
+    derived_from_version = Column(Integer, nullable=True)
     relationships = Column(JSON, nullable=False)
     tables = Column(JSON, nullable=False)
     uploaded_at = Column(DateTime, default=datetime.utcnow)

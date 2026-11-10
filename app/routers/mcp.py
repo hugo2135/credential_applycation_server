@@ -12,6 +12,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from app import bookmarks as bookmark_store
 from app.access_log import get_mcp_request_context, record_access
 from app.database import SessionLocal
+from app.model_versions import serving_chunk, serving_model_version
 from app.models import AccessTicket, ModelChunk, PbiConfig, PersonalAccessToken, User, UserPbiConfig
 from app.routers.ticket import EXPIRED_ACCOUNT_MESSAGE, ticket_ttl_seconds
 from app.security import generate_access_ticket, hash_opaque_token, verify_mcp_access_token
@@ -130,9 +131,9 @@ def _log_tool_access(db, user: User, tool_name: str, detail: str | None = None) 
 class _ModelChunkMissing(Exception):
     """內部用：找不到指定版本的語意模型。
 
-    刻意用例外而不是回傳 None，因為 `functools.lru_cache` **不會快取例外**。若快取了
-    None，「把某個設定的版本全部刪光後重新上傳」會讓版本號從 1 重新開始（見 admin.py
-    的 upload_model），然後撞到先前快取的 None 而誤判成「尚未上傳任何語意模型」。
+    刻意用例外而不是回傳 None，因為 `functools.lru_cache` **不會快取例外**。v1.6 起版本號
+    只增不減（app/model_versions.py 的 allocate_model_version），同一個號碼不會再對應到
+    別的內容；但「查不到」這種結果仍不該留在快取裡，避免任何時序問題被放大成長期錯誤。
     """
 
 
@@ -154,6 +155,7 @@ def _load_model_chunk(pbi_config_id: str, model_version: int) -> tuple[dict, lis
     `column_aliases`／`workspace_id`／`dataset_id` 這些管理員隨時會在詳情頁改的東西，
     一律由呼叫端每次從 `config` 物件現讀，所以改完立刻生效，不會因為快取而讀到舊值。
     上傳新版本會讓 `model_version` 變動、key 自然改變，也就不需要任何主動失效機制。
+    這依賴「版本號不重複使用、版本內容不就地修改」，見 app/model_versions.py。
 
     回傳的結構是**多個呼叫共用的**，呼叫端只能讀、不可以就地修改。
     """
@@ -223,20 +225,15 @@ def get_mcp_server() -> FastMCP:
                 config = db.query(PbiConfig).filter(PbiConfig.id == link.pbi_config_id).first()
                 if not config:
                     continue
-                latest = (
-                    db.query(ModelChunk)
-                    .filter(ModelChunk.pbi_config_id == link.pbi_config_id)
-                    .order_by(ModelChunk.model_version.desc())
-                    .first()
-                )
-                if not latest:
+                chunk = serving_chunk(db, link.pbi_config_id)
+                if not chunk:
                     continue
                 result.append({
                     "pbi_config_id": config.id,
                     "pbi_config_name": config.name,
-                    "model_version": latest.model_version,
-                    "model_description": latest.model_description,
-                    "table_count": len(latest.tables) if latest.tables else 0,
+                    "model_version": chunk.model_version,
+                    "model_description": chunk.model_description,
+                    "table_count": len(chunk.tables) if chunk.tables else 0,
                     "query_modes": [
                         {"mode_id": m.get("mode_id"), "name": m.get("name"), "description": m.get("description")}
                         for m in (config.query_modes or [])
@@ -255,17 +252,11 @@ def get_mcp_server() -> FastMCP:
             user = _current_user(db)
             _log_tool_access(db, user, "get_model_detail", detail=pbi_config_id)
             config = _check_access(user, pbi_config_id, db)
-            # 只撈 model_version 這一欄，不要整列 select——整列會連 relationships/tables
+            # serving_model_version 只撈版本號欄位，不整列 select——整列會連 relationships/tables
             # 兩個大 JSON 欄位一起讀出來並解析，那正是下面要靠快取避開的成本。
-            latest = (
-                db.query(ModelChunk.model_version)
-                .filter(ModelChunk.pbi_config_id == pbi_config_id)
-                .order_by(ModelChunk.model_version.desc())
-                .first()
-            )
-            if not latest:
+            model_version = serving_model_version(db, pbi_config_id)
+            if model_version is None:
                 raise ToolError("此 PBI 設定尚未上傳任何語意模型")
-            model_version = latest[0]
 
             try:
                 relationships, tables = _load_model_chunk(pbi_config_id, model_version)
@@ -400,7 +391,7 @@ def get_mcp_server() -> FastMCP:
             config = db.query(PbiConfig).filter(PbiConfig.id == pbi_config_id).first()
             item = bookmark_store.bookmark_dict(
                 bookmark, config.name if config else None,
-                bookmark_store.latest_model_version(db, pbi_config_id),
+                serving_model_version(db, pbi_config_id),
             )
             if status == "conflict":
                 return {

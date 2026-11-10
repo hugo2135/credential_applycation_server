@@ -9,7 +9,8 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from app.models import Bookmark, ModelChunk, PbiConfig, UserPbiConfig
+from app.model_versions import serving_model_version
+from app.models import Bookmark, PbiConfig, UserPbiConfig
 
 # 上限是為了保護 1GB RAM 的小 VM：書籤是讓使用者無限寫入的資料，不設限就可能被灌爆。
 MAX_BOOKMARKS_PER_USER = 100
@@ -33,16 +34,6 @@ def _accessible_configs(db: Session, user_id: str) -> dict[str, PbiConfig]:
         .all()
     )
     return {c.id: c for c in rows}
-
-
-def latest_model_version(db: Session, pbi_config_id: str) -> int | None:
-    row = (
-        db.query(ModelChunk.model_version)
-        .filter(ModelChunk.pbi_config_id == pbi_config_id)
-        .order_by(ModelChunk.model_version.desc())
-        .first()
-    )
-    return row[0] if row else None
 
 
 def bookmark_dict(b: Bookmark, config_name: str | None, current_version: int | None) -> dict:
@@ -74,7 +65,8 @@ def list_bookmarks(db: Session, user_id: str, pbi_config_id: str | None = None) 
     if not configs:
         return []
 
-    versions = {cid: latest_model_version(db, cid) for cid in configs}
+    # 跟 MCP 實際提供的版本比，不是跟最新版比：管理員退回舊版時，新版上存的書籤要標成可能過時
+    versions = {cid: serving_model_version(db, cid) for cid in configs}
     rows = (
         db.query(Bookmark)
         .filter(Bookmark.user_id == user_id, Bookmark.pbi_config_id.in_(list(configs)))
@@ -116,7 +108,7 @@ def save_bookmark(
     - "overwritten"：同名書籤已存在且 overwrite=True，已覆蓋
     - "conflict"：同名書籤已存在但 overwrite=False，什麼都沒改，回傳的是既有那筆
 
-    model_version 留空代表「存檔當下的最新版本」；匯入時會帶匯出檔裡的版本，讓別人
+    model_version 留空代表「存檔當下 MCP 提供的版本」；匯入時會帶匯出檔裡的版本，讓別人
     分享來的舊書籤仍然能被正確標成可能過時。
     """
     configs = _accessible_configs(db, user_id)
@@ -124,7 +116,7 @@ def save_bookmark(
         raise BookmarkError("無此 PBI 設定的存取權")
     title, dax, question = _validate(title, dax, question)
     if model_version is None:
-        model_version = latest_model_version(db, pbi_config_id)
+        model_version = serving_model_version(db, pbi_config_id)
 
     existing = db.query(Bookmark).filter(
         Bookmark.user_id == user_id,

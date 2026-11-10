@@ -6,7 +6,8 @@ from sqlalchemy.orm import Session
 
 from app.access_log import client_ip, record_access
 from app.database import get_db
-from app.models import User, PbiConfig, ModelChunk, UserPbiConfig
+from app.model_versions import serving_chunk, serving_model_version
+from app.models import User, PbiConfig, UserPbiConfig
 from app.security import hash_mask_key, decrypt_secret
 
 router = APIRouter(prefix="/api", tags=["skill-api"])
@@ -88,21 +89,16 @@ def get_models(
         config = db.query(PbiConfig).filter(PbiConfig.id == link.pbi_config_id).first()
         if not config:
             continue
-        latest = (
-            db.query(ModelChunk)
-            .filter(ModelChunk.pbi_config_id == link.pbi_config_id)
-            .order_by(ModelChunk.model_version.desc())
-            .first()
-        )
-        if not latest:
+        chunk = serving_chunk(db, link.pbi_config_id)
+        if not chunk:
             continue
         result.append({
             "pbi_config_id": config.id,
             "pbi_config_name": config.name,
-            "model_version": latest.model_version,
-            "model_description": latest.model_description,
-            "relationships": latest.relationships,
-            "tables": latest.tables,
+            "model_version": chunk.model_version,
+            "model_description": chunk.model_description,
+            "relationships": chunk.relationships,
+            "tables": chunk.tables,
         })
     return {"models": result}
 
@@ -120,12 +116,7 @@ def get_token(
 
     result = acquire_powerbi_token(user)
 
-    latest = (
-        db.query(ModelChunk)
-        .filter(ModelChunk.pbi_config_id == pbi_config_id)
-        .order_by(ModelChunk.model_version.desc())
-        .first()
-    )
+    model_version = serving_model_version(db, pbi_config_id)
 
     return {
         "access_token": result["access_token"],
@@ -133,5 +124,5 @@ def get_token(
         "expires_in": result.get("expires_in", 3600),
         "workspace_id": config.workspace_id,
         "dataset_id": config.dataset_id,
-        "model_version": latest.model_version if latest else 0,
+        "model_version": model_version or 0,
     }

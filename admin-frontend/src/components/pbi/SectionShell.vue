@@ -1,9 +1,10 @@
 <template>
   <div>
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px">
-      <span v-if="schemaHint && !section.state.jsonMode" style="font-size: 12px; color: var(--el-color-warning)">
-        {{ schemaHint }}
-      </span>
+      <slot v-if="!section.state.jsonMode" name="hint">
+        <span v-if="schemaHint" style="font-size: 12px; color: var(--el-color-warning)">{{ schemaHint }}</span>
+        <span v-else />
+      </slot>
       <span v-else />
       <el-switch
         :model-value="section.state.jsonMode"

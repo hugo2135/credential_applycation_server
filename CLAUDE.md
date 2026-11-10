@@ -49,10 +49,16 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 - `mcp.py` 的存取紀錄分兩層：`_JwtTokenVerifier` 每個 HTTP request 都記一筆通用的 `path="/mcp"`（含 `initialize`/`list_tools` 這些協定層呼叫，用來看背景連線活動）；`_log_tool_access()` 額外在 `list_models`/`get_model_detail`/`get_query_ticket` 三個 tool 各自呼叫，記一筆 `path="/mcp/{tool_name}"`，才看得出「哪個使用者觸發了哪個功能」。同一次真正的 tool 呼叫因此會有兩筆紀錄，這是刻意的（各自用途不同），不是重複寫入的 bug。 `AccessLog.detail` 放這次操作的對象（目前是 `pbi_config_id`），`get_model_detail`/`get_query_ticket`/ticket redeem 都會帶；`list_models` 沒有特定對象所以留空。查詢是在 client 端直接打 Power BI 的，server 這邊唯一留得下的線索就是這筆紀錄，要跟 Power BI 自己的 activity log 對起來還原「誰查了哪個模型」就靠這欄。
 - `/mcp` 的驗證點（`TokenVerifier.verify_token()`）介面只給 token 字串、拿不到 `Request` 物件，IP／HTTP method 要記錄下來得靠 `main.py` 的 `_McpTrailingSlashFix`（ASGI 層，比 FastAPI 的 Request 更早）從原始 scope 讀出來、存進 `app/access_log.py` 的 contextvar，`_JwtTokenVerifier` 再讀出來寫進 log。這個 contextvar 是 per-task 的，並發請求之間不會互相污染。
 - `PbiConfig.query_modes`（資料曝光範圍模式）跟 `filters` 是兩個獨立機制、疊加而非取代：`get_model_detail` 帶 `mode_id` 時只把該模式的 `filters` 包成一筆 `alwaysApply=true` 的 filter profile 塞進既有 `filters` 陣列尾端，skill 端原本的比對邏輯完全不用改；`mode.tables` 為空代表不限制表範圍（不是「全部不給看」）。存取限制沿用既有的 `UserPbiConfig` 指派機制，沒有另外做使用者-模式層級的授權——同一份資料要給不同部門看不同範圍，作法是管理員建立多個 `PbiConfig`（各自定義相關 `query_modes`）分別指派，不是同一個設定裡限制特定使用者只能用某些模式。
-- `get_model_detail` 用 `_load_model_chunk()`（`lru_cache`，上限 16 筆）快取語意模型的 `relationships`/`tables`——單一模型實測約 95KB JSON，每次呼叫都讓 SQLite 讀 TEXT 再 `json.loads` 在小 VM 上是實際負擔。**快取 key 刻意只有 `(pbi_config_id, model_version)`**：只快取上傳後就不再變的模型結構，`filters`/`query_modes`/`column_aliases`/`workspace_id`/`dataset_id` 一律每次從 `config` 物件現讀，所以管理員改完立刻生效。若把整包回應照 `model_version` 快取就會出事——那幾個欄位改了但版本沒變，skill 會一直拿到舊的篩選規則。上傳新版本會讓 key 自然改變，不需要主動失效。另外查最新版本時只 `select model_version` 一欄，整列 select 會把要避開的大 JSON 又讀出來；`_load_model_chunk` 找不到時**丟例外而不是回傳 None**，因為 `lru_cache` 不快取例外，而版本全刪後重新上傳會讓版本號從 1 重來、撞到被快取的 None。
+- `get_model_detail` 用 `_load_model_chunk()`（`lru_cache`，上限 16 筆）快取語意模型的 `relationships`/`tables`——單一模型實測約 95KB JSON，每次呼叫都讓 SQLite 讀 TEXT 再 `json.loads` 在小 VM 上是實際負擔。**快取 key 刻意只有 `(pbi_config_id, model_version)`**：只快取上傳後就不再變的模型結構，`filters`/`query_modes`/`column_aliases`/`workspace_id`/`dataset_id` 一律每次從 `config` 物件現讀，所以管理員改完立刻生效。若把整包回應照 `model_version` 快取就會出事——那幾個欄位改了但版本沒變，skill 會一直拿到舊的篩選規則。上傳新版本會讓 key 自然改變，不需要主動失效——前提是**版本號不重複使用、版本內容不就地修改**（見下方「語意模型版本」）。另外查版本號時只 `select model_version` 一欄，整列 select 會把要避開的大 JSON 又讀出來；`_load_model_chunk` 找不到時**丟例外而不是回傳 None**，因為 `lru_cache` 不快取例外，而版本全刪後重新上傳會讓版本號從 1 重來、撞到被快取的 None。
 - `PbiConfig.column_aliases`（重點欄位別名）不受 `mode_id` 影響，`get_model_detail` 固定整包回傳；跟 `filters` 是完全不同的機制——`filters` 是關鍵字比對後注入整段 DAX 布林運算式，`column_aliases` 是「欄位＋值＋同義詞」的對照表，給 skill 在生成 DAX 前把使用者的自然語言用詞（例如「北部」）轉換成 Power BI 實際存的欄位值（例如 `"North"`）。v1.5 起每組另有欄位本身的 `aliases`（「地區」→ `region`）；舊資料沒有這個 key，`get_model_detail` 回傳時補成 `[]`，DB 不做 migration。
 - `admin.py` 的 `PATCH /pbi-configs/batch-update` **必須**註冊在 `PATCH /pbi-configs/{config_id}` 之前——FastAPI 依路由註冊順序比對，`{config_id}` 這種單一路徑段會把字面上的 `"batch-update"` 當成 config_id 吃掉，順序反了會變成一直 404「找不到 PBI 設定：batch-update」，不會進到批次更新的邏輯。批次修改刻意只開放 `workspace_id`/`dataset_id`/`column_aliases`（底層 dataset 本身的屬性，多設定共用同一份資料時理應一致），`filters`/`query_modes` 不給批次改，因為它們的存在目的就是讓不同設定之間刻意不同（部門區隔），批次覆蓋容易靜默破壞管理員已經調好的存取範圍。
-- 「複製 PBI 設定」（`POST /pbi-configs/{id}/duplicate`）連同最新一版 `ModelChunk` 一起複製成新設定的版本 1，複製後兩份設定完全獨立（物理複製，不是共用連結）——上游語意模型變動時兩邊都要各自重新上傳，不會自動同步。
+- **語意模型版本**（`app/model_versions.py`，v1.6）：
+  - `PbiConfig.active_model_version` 指定 MCP／legacy API 提供哪一版，`None` = 跟隨最新版。所有「該給 skill 哪一版」的地方（`list_models`、`get_model_detail`、`/api/models`、`/api/token`、書籤的 `possibly_outdated`、`/schema` 預設、複製設定）一律走 `serving_model_version()`/`serving_chunk()`，**不要再自己 `order_by(model_version.desc())` 抓最新版**。指定中的版本不能刪（409）。
+  - 版本號由 `allocate_model_version()` 配發，`PbiConfig.last_model_version` 記用過的最大值，刪掉的號碼不再使用。v1.6 之前是「現存最大 + 1」，刪掉最新版再上傳會撞號，讓 lru_cache 繼續回傳被刪掉的那份內容。
+  - 「刪減項目」（`POST /model/versions/{id}/derive`）從某版刪除表／欄位／量值，**另存成新版本**（`derived_from_version` 記來源），原版本不動；引用到被刪表／欄位的關聯自動刪除，欄位量值全刪光的表視同整張刪除。保留的量值若仍引用被刪除項目回 409 + `dangling` 清單，前端確認後帶 `allow_dangling=true`。這裡的刪除只影響 AI 看到的模型說明，Power BI dataset 不變，所以懸空引用是警告不是錯誤。
+  - DAX 引用分析是啟發式（去掉字串／註解、`Name(` 視為函式呼叫、沒加表名的 `[X]` 先當量值），前端 `admin-frontend/src/components/pbi/modelDeps.ts` 做即時預覽與連帶勾選，後端 `find_broken_measures()` 存檔時再檢查一次，**兩邊規則要一起改**。連帶勾選只從管理員手動勾的量值往下展開；因引用被刪除的表而受影響的量值預設不勾（量值在 Power BI 上照樣能算）。
+  - PBI 設定的篩選規則／查詢模式／欄位別名屬於設定、不屬於版本，刪減時只列出引用提醒不自動改——指定了提供版本時，改設定會立刻影響線上那一版。
+- 「複製 PBI 設定」（`POST /pbi-configs/{id}/duplicate`）連同來源**目前提供中**的那一版 `ModelChunk` 一起複製成新設定的版本 1，複製後兩份設定完全獨立（物理複製，不是共用連結）——上游語意模型變動時兩邊都要各自重新上傳，不會自動同步。
 - **查詢權限檢測**（`app/query_check.py`，`POST /api/admin/users/{id}/query-check`）用使用者的 SP 對已指派模型跑 `EVALUATE ROW("ok", 1)`，結果記在 `UserPbiConfig.check_status/check_message/checked_at`（「使用者 × 模型」層級，因為同一人可能 A 模型通、B 模型不通）。這是 server 唯一自己打 Power BI 的地方，**不違反「server 不代理查詢」**——那條規則是怕 MCP tool 的同步呼叫卡住 event loop；這裡是管理員手動觸發、跑在一般 FastAPI 同步端點（thread pool），跟 ticket redeem 同理。結果會在三種情況被 `reset_checks()` 重置成未檢測：改 Azure AD 憑證、PBI 設定的 `workspace_id`/`dataset_id` **真的變動**（送一樣的值不算）。`PUT /users/{id}/pbi-configs` 因此改成差異更新（只刪被取消的、只加新的），整批刪掉重建會把沒變動的模型檢測結果一起洗掉。前端在儲存憑證／指派後自動觸發檢測；錯誤訊息第一行是白話原因、後面附原始錯誤（AADSTS 錯誤碼、Power BI 回應 body），翻譯表在 `query_check.py` 的 `_AAD_HINTS`/`_POWERBI_HINTS`。
 - **書籤**（`Bookmark` 表、`app/bookmarks.py`）由 MCP tool（`list_bookmarks`/`save_bookmark`/`delete_bookmark`）與使用者網頁（`/auth/bookmarks`，含匯出匯入）共用同一份邏輯。綁定 `pbi_config_id`，只顯示目前仍被指派的模型的書籤（取消指派是隱藏不是刪除）。`save_bookmark` 同名時**刻意不覆蓋**，回傳 `conflict` 與既有內容，tool 說明要求 AI 先問使用者、同意後才帶 `overwrite=true`。存檔時記下 `model_version`，模型升版後 `possibly_outdated=true`，skill 應改用 `question` 重新生成。每人上限 100 筆（保護小 VM）。刪除使用者或 PBI 設定時一併刪除書籤。
 
@@ -121,6 +127,7 @@ app/
   access_log.py    存取歷史寫入共用邏輯（record_access），三個身份驗證點都呼叫這裡
   bookmarks.py     書籤共用邏輯（MCP tool 與 /auth/bookmarks 共用，含匯出匯入格式）
   query_check.py   查詢權限檢測（用使用者 SP 跑最小查詢 + 錯誤翻譯）
+  model_versions.py 語意模型版本：配號、目前提供哪一版、刪減項目另存新版本 + DAX 引用分析
   models.py        SQLAlchemy ORM（含 OAuth 三張表 + personal_access_tokens + access_logs + access_tickets）
   database.py      SQLAlchemy 設定
   routers/
@@ -154,7 +161,7 @@ docs/
 /admin/pbi-configs      PBI 設定列表（管理員，僅建立/刪除）
 /admin/pbi-configs/:id  PBI 設定詳情（管理員，Tab：基本設定/語意模型版本/篩選規則/查詢模式/篩選欄位別名，一站式管理，取代原本獨立的 /admin/model）
                         後三個 Tab 預設是表單（admin-frontend/src/components/pbi/），可切換「以 JSON 編輯」；表名/欄位下拉來自
-                        GET /api/admin/pbi-configs/{id}/schema（最新一版模型）。畫面上的中文名稱可隨意改，JSON key 是 skill 契約不能動
+                        GET /api/admin/pbi-configs/{id}/schema（預設 MCP 提供中的版本，可用 ?version= 改看別版）。畫面上的中文名稱可隨意改，JSON key 是 skill 契約不能動
 
 /admin/access-logs      存取歷史查詢／匯出（管理員）
 ```

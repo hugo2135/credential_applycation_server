@@ -81,6 +81,8 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
 ```
 `query_modes` 是管理員在 `/admin/pbi-configs/{id}` 詳情頁設定的「資料曝光範圍模式」，沒設定時是空陣列 `[]`。**如果某個 `pbi_config_id` 底下有多個 `query_modes`，Skill 應該先問使用者要用哪一個**（例如列出 `name`/`description` 讓使用者選），再把選到的 `mode_id` 帶進 `get_model_detail`；只有一個或沒有的話不需要問，直接照原本流程走即可。
 
+**`model_version` 是「目前提供給 AI 的版本」，不一定是最新上傳的版本**（v1.6）：管理員可以把某個 PBI 設定固定在舊版，新版本確認無誤後才切換；也可能回退到舊版，所以版本號**可能變小**。Skill 判斷快取是否失效時請比對「是否不同」，不要比大小。同一個版本號的內容永遠不變（版本號不重複使用，刪除表／欄位也是另存新版本），所以版本號相同就可以放心沿用快取。
+
 ### `get_model_detail`
 
 取得指定 PBI 設定的完整語意模型結構，DAX 生成前查表格/欄位/量值用，**也是查詢這個模型所需的 `workspace_id`/`dataset_id`、篩選規則 `filters`、欄位別名 `column_aliases` 的來源**。
@@ -325,7 +327,7 @@ Content-Type: application/json
 ```
 
 - 只會列出**目前仍被指派**的模型的書籤。管理員取消指派後書籤會隱藏，重新指派就回來
-- **`possibly_outdated: true`** 代表存檔之後語意模型升過版，DAX 引用的表/欄位可能已改名或刪除。**請不要直接執行**：先告知使用者，建議用 `question` 搭配 `get_model_detail` 重新生成 DAX
+- **`possibly_outdated: true`** 代表存檔時的版本跟目前提供的版本不同（升版或管理員回退舊版都算），DAX 引用的表/欄位可能已改名或刪除。**請不要直接執行**：先告知使用者，建議用 `question` 搭配 `get_model_detail` 重新生成 DAX
 
 ### `save_bookmark`
 

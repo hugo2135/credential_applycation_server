@@ -12,6 +12,7 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     ColumnAliasesEditor: typeof import('./src/components/pbi/ColumnAliasesEditor.vue')['default']
+    DeriveVersionDialog: typeof import('./src/components/pbi/DeriveVersionDialog.vue')['default']
     ElAlert: typeof import('element-plus/es')['ElAlert']
     ElAside: typeof import('element-plus/es')['ElAside']
     ElButton: typeof import('element-plus/es')['ElButton']
@@ -26,6 +27,9 @@ declare module 'vue' {
     ElDescriptionsItem: typeof import('element-plus/es')['ElDescriptionsItem']
     ElDialog: typeof import('element-plus/es')['ElDialog']
     ElDivider: typeof import('element-plus/es')['ElDivider']
+    ElDropdown: typeof import('element-plus/es')['ElDropdown']
+    ElDropdownItem: typeof import('element-plus/es')['ElDropdownItem']
+    ElDropdownMenu: typeof import('element-plus/es')['ElDropdownMenu']
     ElEmpty: typeof import('element-plus/es')['ElEmpty']
     ElForm: typeof import('element-plus/es')['ElForm']
     ElFormItem: typeof import('element-plus/es')['ElFormItem']
@@ -55,6 +59,7 @@ declare module 'vue' {
     QueryModesEditor: typeof import('./src/components/pbi/QueryModesEditor.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
+    SchemaSource: typeof import('./src/components/pbi/SchemaSource.vue')['default']
     SectionShell: typeof import('./src/components/pbi/SectionShell.vue')['default']
     TagInput: typeof import('./src/components/pbi/TagInput.vue')['default']
   }

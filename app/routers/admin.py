@@ -15,6 +15,13 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.model_versions import (
+    allocate_model_version,
+    apply_removal,
+    find_broken_measures,
+    serving_chunk,
+    serving_model_version,
+)
 from app.models import AccessLog, Bookmark, PersonalAccessToken, User, PbiConfig, ModelChunk, UserPbiConfig
 from app.query_check import check_user_configs, link_check_dict, reset_checks
 from app.security import MAX_LOGIN_ATTEMPTS, encrypt_secret, issue_admin_jwt, verify_admin_jwt
@@ -478,6 +485,7 @@ def _pbi_config_dict(c: PbiConfig) -> dict:
         "filters": c.filters or [],
         "query_modes": c.query_modes or [],
         "column_aliases": c.column_aliases or [],
+        "active_model_version": c.active_model_version,
         "updated_at": c.updated_at,
     }
 
@@ -493,21 +501,29 @@ def get_pbi_config(config_id: str, _=Depends(_require_admin_jwt), db: Session = 
     config = db.query(PbiConfig).filter(PbiConfig.id == config_id).first()
     if not config:
         raise HTTPException(status_code=404, detail="找不到 PBI 設定")
-    return _pbi_config_dict(config)
+    return {**_pbi_config_dict(config), "serving_model_version": serving_model_version(db, config_id)}
 
 
 @router.get("/pbi-configs/{config_id}/schema")
-def get_pbi_config_schema(config_id: str, _=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
-    """最新一版語意模型的表名與欄位名，給詳情頁的篩選規則／查詢模式／欄位別名表單做下拉選單。
+def get_pbi_config_schema(
+    config_id: str,
+    version: Optional[int] = Query(None, description="要列哪一版；不帶就是 MCP 目前提供的版本"),
+    _=Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    """語意模型的表名與欄位名，給詳情頁的篩選規則／查詢模式／欄位別名表單做下拉選單。
+    預設列 MCP 實際提供的版本——列最新版的話，指定了舊版提供時會選到 skill 看不到的表。
     還沒上傳模型時回空清單，前端退回手動輸入。"""
     if not db.query(PbiConfig.id).filter(PbiConfig.id == config_id).first():
         raise HTTPException(status_code=404, detail="找不到 PBI 設定")
-    chunk = (
-        db.query(ModelChunk)
-        .filter(ModelChunk.pbi_config_id == config_id)
-        .order_by(ModelChunk.model_version.desc())
-        .first()
-    )
+    if version is None:
+        chunk = serving_chunk(db, config_id)
+    else:
+        chunk = db.query(ModelChunk).filter(
+            ModelChunk.pbi_config_id == config_id, ModelChunk.model_version == version,
+        ).first()
+        if not chunk:
+            raise HTTPException(status_code=404, detail=f"找不到版本 {version}")
     tables = []
     for t in (chunk.tables or []) if chunk else []:
         columns = [c.get("column") for c in t.get("columns", []) if c.get("column")]
@@ -588,6 +604,36 @@ def update_pbi_config(
     return {"message": "PBI 設定更新成功"}
 
 
+class ActiveVersionRequest(BaseModel):
+    # None = 跟隨最新版
+    model_version: Optional[int] = None
+
+
+@router.put("/pbi-configs/{config_id}/active-version")
+def set_active_model_version(
+    config_id: str,
+    body: ActiveVersionRequest,
+    _=Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    config = db.query(PbiConfig).filter(PbiConfig.id == config_id).first()
+    if not config:
+        raise HTTPException(status_code=404, detail="找不到 PBI 設定")
+    if body.model_version is not None and not db.query(ModelChunk.id).filter(
+        ModelChunk.pbi_config_id == config_id, ModelChunk.model_version == body.model_version,
+    ).first():
+        raise HTTPException(status_code=404, detail=f"找不到版本 {body.model_version}")
+    config.active_model_version = body.model_version
+    config.updated_at = datetime.utcnow()
+    db.commit()
+    serving = serving_model_version(db, config_id)
+    return {
+        "active_model_version": config.active_model_version,
+        "serving_model_version": serving,
+        "message": f"MCP 改為提供版本 {serving}" if body.model_version is not None else f"改為跟隨最新版（目前是版本 {serving}）",
+    }
+
+
 @router.post("/pbi-configs/{config_id}/duplicate", status_code=201)
 def duplicate_pbi_config(
     config_id: str,
@@ -612,20 +658,17 @@ def duplicate_pbi_config(
     db.add(new_config)
     db.flush()  # 先取得 new_config.id，語意模型才有 pbi_config_id 可以掛
 
-    latest = (
-        db.query(ModelChunk)
-        .filter(ModelChunk.pbi_config_id == config_id)
-        .order_by(ModelChunk.model_version.desc())
-        .first()
-    )
-    if latest:
+    # 複製來源實際提供給 MCP 的那一版（不一定是最新版），新設定預設跟隨最新版
+    chunk = serving_chunk(db, config_id)
+    if chunk:
+        new_config.last_model_version = 1
         db.add(ModelChunk(
             model_version=1,
-            name=latest.name,
+            name=chunk.name,
             pbi_config_id=new_config.id,
-            model_description=latest.model_description,
-            relationships=latest.relationships,
-            tables=latest.tables,
+            model_description=chunk.model_description,
+            relationships=chunk.relationships,
+            tables=chunk.tables,
         ))
 
     db.commit()
@@ -674,16 +717,10 @@ def upload_model(
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"JSON 解析失敗：{e}")
 
-    latest = (
-        db.query(ModelChunk)
-        .filter(ModelChunk.pbi_config_id == body.pbi_config_id)
-        .order_by(ModelChunk.model_version.desc())
-        .first()
-    )
-    next_version = (latest.model_version + 1) if latest else 1
-
-    if not db.query(PbiConfig).filter(PbiConfig.id == body.pbi_config_id).first():
+    config = db.query(PbiConfig).filter(PbiConfig.id == body.pbi_config_id).first()
+    if not config:
         raise HTTPException(status_code=404, detail="找不到指定的 PBI 設定")
+    next_version = allocate_model_version(db, config)
 
     chunk = ModelChunk(
         model_version=next_version,
@@ -714,6 +751,7 @@ def list_model_versions(
     if pbi_config_id:
         q = q.filter(ModelChunk.pbi_config_id == pbi_config_id)
     chunks = q.order_by(ModelChunk.model_version.desc()).all()
+    serving = {cid: serving_model_version(db, cid) for cid in {c.pbi_config_id for c in chunks} if cid}
     return [
         {
             "id": c.id,
@@ -721,6 +759,8 @@ def list_model_versions(
             "name": c.name,
             "model_description": c.model_description,
             "pbi_config_id": c.pbi_config_id,
+            "derived_from_version": c.derived_from_version,
+            "is_serving": serving.get(c.pbi_config_id) == c.model_version,
             "table_count": len(c.tables) if c.tables else 0,
             "relationship_count": len(c.relationships.get("relationships", [])) if c.relationships else 0,
             "uploaded_at": c.uploaded_at,
@@ -800,5 +840,119 @@ def delete_model_version(
     chunk = db.query(ModelChunk).filter(ModelChunk.id == chunk_id).first()
     if not chunk:
         raise HTTPException(status_code=404, detail="版本不存在")
+    config = db.query(PbiConfig).filter(PbiConfig.id == chunk.pbi_config_id).first()
+    if config and config.active_model_version == chunk.model_version:
+        raise HTTPException(
+            status_code=409,
+            detail=f"版本 {chunk.model_version} 目前指定給 MCP 提供，請先切換到其他版本或改回跟隨最新版再刪除",
+        )
     db.delete(chunk)
     db.commit()
+
+
+@router.get("/model/versions/{chunk_id}/content")
+def get_model_version_content(
+    chunk_id: str,
+    _: dict = Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    """完整的表／欄位／量值（含 DAX）與關聯，給「刪除項目並另存新版本」的編輯畫面做引用分析。"""
+    chunk = db.query(ModelChunk).filter(ModelChunk.id == chunk_id).first()
+    if not chunk:
+        raise HTTPException(status_code=404, detail="版本不存在")
+    return {
+        "id": chunk.id,
+        "model_version": chunk.model_version,
+        "name": chunk.name,
+        "tables": chunk.tables or [],
+        "relationships": (chunk.relationships or {}).get("relationships", []),
+    }
+
+
+class ColumnRef(BaseModel):
+    table: str
+    column: str
+
+
+class MeasureRef(BaseModel):
+    table: str
+    measure: str
+
+
+class DeriveVersionRequest(BaseModel):
+    remove_tables: list[str] = []
+    remove_columns: list[ColumnRef] = []
+    remove_measures: list[MeasureRef] = []
+    name: Optional[str] = None
+    # 前端已經讓管理員看過、並確認保留仍引用被刪除項目的量值時才帶 true
+    allow_dangling: bool = False
+
+
+@router.post("/model/versions/{chunk_id}/derive", status_code=201)
+def derive_model_version(
+    chunk_id: str,
+    body: DeriveVersionRequest,
+    _: dict = Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    """從指定版本刪除表／欄位／量值，另存成新版本；原版本不動（理由見 app/model_versions.py）。
+    引用到被刪除表或欄位的關聯會一併刪除。"""
+    source = db.query(ModelChunk).filter(ModelChunk.id == chunk_id).first()
+    if not source:
+        raise HTTPException(status_code=404, detail="版本不存在")
+    config = db.query(PbiConfig).filter(PbiConfig.id == source.pbi_config_id).first()
+    if not config:
+        raise HTTPException(status_code=404, detail="找不到這個版本所屬的 PBI 設定")
+
+    tables = source.tables or []
+    if not (body.remove_tables or body.remove_columns or body.remove_measures):
+        raise HTTPException(status_code=422, detail="沒有選擇要刪除的項目")
+
+    # 名稱對不上代表前端拿的是別的版本的資料，直接擋下，不要靜默忽略
+    by_name = {t["table"].lower(): t for t in tables}
+    unknown = [t for t in body.remove_tables if t.lower() not in by_name]
+    for c in body.remove_columns:
+        t = by_name.get(c.table.lower())
+        if not t or not any((x.get("column") or "").lower() == c.column.lower() for x in t.get("columns", [])):
+            unknown.append(f"{c.table}[{c.column}]")
+    for m in body.remove_measures:
+        t = by_name.get(m.table.lower())
+        if not t or not any((x.get("measure") or "").lower() == m.measure.lower() for x in t.get("measures", [])):
+            unknown.append(f"{m.table}[{m.measure}]")
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"版本 {source.model_version} 裡找不到：{'、'.join(unknown)}")
+
+    removed_columns = [(c.table, c.column) for c in body.remove_columns]
+    removed_measures = [(m.table, m.measure) for m in body.remove_measures]
+    relationships, new_tables, removed_rel_count = apply_removal(
+        source.relationships, tables, body.remove_tables, removed_columns, removed_measures,
+    )
+    if not new_tables:
+        raise HTTPException(status_code=422, detail="不能把所有資料表都刪掉")
+
+    broken = find_broken_measures(tables, body.remove_tables, removed_columns, removed_measures)
+    if broken and not body.allow_dangling:
+        raise HTTPException(status_code=409, detail={
+            "message": f"有 {len(broken)} 個保留的量值仍引用被刪除的項目",
+            "dangling": broken,
+        })
+
+    next_version = allocate_model_version(db, config)
+    db.add(ModelChunk(
+        model_version=next_version,
+        name=body.name or f"由版本 {source.model_version} 刪除部分項目",
+        pbi_config_id=config.id,
+        model_description=source.model_description,
+        derived_from_version=source.model_version,
+        relationships=relationships,
+        tables=new_tables,
+    ))
+    db.commit()
+    return {
+        "model_version": next_version,
+        "table_count": len(new_tables),
+        "relationship_count": len(relationships["relationships"]),
+        "removed_relationship_count": removed_rel_count,
+        "serving_model_version": serving_model_version(db, config.id),
+        "message": f"已另存為版本 {next_version}",
+    }

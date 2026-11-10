@@ -85,7 +85,25 @@
 
         <el-col :span="13">
           <el-card>
-            <template #header>版本歷史</template>
+            <template #header>
+              <div class="card-head">
+                <span>版本歷史</span>
+                <span class="serving">
+                  AI 目前拿到：<b>{{ servingVersion ? `版本 ${servingVersion}` : '—' }}</b>
+                  <el-switch
+                    :model-value="followLatest"
+                    active-text="跟隨最新版"
+                    :disabled="!versions.length"
+                    @change="(on: string | number | boolean) => setServing(on ? null : servingVersion)"
+                  />
+                </span>
+              </div>
+              <div class="hint">
+                {{ followLatest
+                  ? '新上傳或另存的版本會立刻提供給 AI。想先檢查新版本再上線，請關掉「跟隨最新版」。'
+                  : '已固定提供上面這一版，新版本不會自動上線；要切換請在該版本的「更多」選「固定提供這一版」。' }}
+              </div>
+            </template>
             <el-table :data="versions" v-loading="loadingVersions" border row-key="id" @expand-change="handleExpand">
               <el-table-column type="expand">
                 <template #default="{ row }">
@@ -103,7 +121,12 @@
                   </div>
                 </template>
               </el-table-column>
-              <el-table-column prop="model_version" label="版本" width="60" align="center" />
+              <el-table-column label="版本" width="80" align="center">
+                <template #default="{ row }">
+                  <div>{{ row.model_version }}</div>
+                  <el-tag v-if="row.is_serving" size="small" type="success">提供中</el-tag>
+                </template>
+              </el-table-column>
               <el-table-column label="名稱" min-width="110">
                 <template #default="{ row }">
                   <template v-if="editingId === row.id">
@@ -119,22 +142,32 @@
                   <span v-else style="cursor: pointer; color: #303133" title="雙擊改名" @dblclick="startRename(row)">
                     {{ row.name || '—' }}
                   </span>
+                  <div v-if="row.derived_from_version" class="hint" style="margin: 0">
+                    由版本 {{ row.derived_from_version }} 刪減而來
+                  </div>
                 </template>
               </el-table-column>
               <el-table-column label="上傳時間" min-width="120">
                 <template #default="{ row }">{{ formatDate(row.uploaded_at) }}</template>
               </el-table-column>
-              <el-table-column label="" width="190" align="center">
+              <el-table-column label="" width="180" align="center">
                 <template #default="{ row }">
-                  <el-button size="small" @click="openDescDialog(row)">
-                    {{ row.model_description ? '編輯說明' : '新增說明' }}
-                  </el-button>
-                  <el-button size="small" type="success" plain @click="exportVersion(row)">匯出</el-button>
-                  <el-popconfirm title="確定刪除此版本？" confirm-button-type="danger" @confirm="deleteVersion(row)">
-                    <template #reference>
-                      <el-button size="small" type="danger" plain>刪除</el-button>
+                  <el-button size="small" @click="openDerive(row)">刪減項目</el-button>
+                  <el-dropdown trigger="click" style="margin-left: 8px" @command="(cmd: string) => onVersionCommand(cmd, row)">
+                    <el-button size="small">更多<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
+                    <template #dropdown>
+                      <el-dropdown-menu>
+                        <el-dropdown-item command="serve" :disabled="config?.active_model_version === row.model_version">
+                          固定提供這一版
+                        </el-dropdown-item>
+                        <el-dropdown-item command="desc">{{ row.model_description ? '編輯說明' : '新增說明' }}</el-dropdown-item>
+                        <el-dropdown-item command="export">匯出</el-dropdown-item>
+                        <el-dropdown-item command="delete" divided :disabled="config?.active_model_version === row.model_version">
+                          刪除
+                        </el-dropdown-item>
+                      </el-dropdown-menu>
                     </template>
-                  </el-popconfirm>
+                  </el-dropdown>
                 </template>
               </el-table-column>
             </el-table>
@@ -151,7 +184,10 @@
           <b>情境篩選</b>只在使用者的問題提到特定關鍵字時才加（例如提到「退貨」時改成只看退貨單）。
         </template>
       </el-alert>
-      <SectionShell :section="filtersSection" :schema-hint="schemaHint">
+      <SectionShell :section="filtersSection">
+        <template #hint>
+          <SchemaSource v-model="schemaVersion" :versions="versionNumbers" :serving-version="servingVersion" />
+        </template>
         <FilterProfilesEditor v-model="filtersSection.state.items" :tables="tableNames" />
       </SectionShell>
     </el-tab-pane>
@@ -164,7 +200,10 @@
           要讓不同部門看不同範圍，請建立多份 PBI 設定分別指派，而不是在同一份設定裡用模式區隔。
         </template>
       </el-alert>
-      <SectionShell :section="queryModesSection" :schema-hint="schemaHint">
+      <SectionShell :section="queryModesSection">
+        <template #hint>
+          <SchemaSource v-model="schemaVersion" :versions="versionNumbers" :serving-version="servingVersion" />
+        </template>
         <QueryModesEditor v-model="queryModesSection.state.items" :tables="tableNames" />
       </SectionShell>
     </el-tab-pane>
@@ -178,11 +217,22 @@
           設定後 AI 會換成正確的名稱去查，避免找錯欄位或因為值對不上而查不到資料。
         </template>
       </el-alert>
-      <SectionShell :section="columnAliasesSection" :schema-hint="schemaHint">
+      <SectionShell :section="columnAliasesSection">
+        <template #hint>
+          <SchemaSource v-model="schemaVersion" :versions="versionNumbers" :serving-version="servingVersion" />
+        </template>
         <ColumnAliasesEditor v-model="columnAliasesSection.state.items" :tables="schemaTables" />
       </SectionShell>
     </el-tab-pane>
   </el-tabs>
+
+  <DeriveVersionDialog
+    v-model="deriveDialog.visible"
+    :chunk-id="deriveDialog.chunkId"
+    :source-version="deriveDialog.version"
+    :config="config"
+    @saved="onDerived"
+  />
 
   <!-- 編輯模型說明 dialog -->
   <el-dialog v-model="descDialog.visible" title="模型說明" width="600px">
@@ -203,7 +253,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { UploadFile } from 'element-plus'
@@ -213,6 +263,8 @@ import SectionShell from '@/components/pbi/SectionShell.vue'
 import FilterProfilesEditor from '@/components/pbi/FilterProfilesEditor.vue'
 import QueryModesEditor from '@/components/pbi/QueryModesEditor.vue'
 import ColumnAliasesEditor from '@/components/pbi/ColumnAliasesEditor.vue'
+import DeriveVersionDialog from '@/components/pbi/DeriveVersionDialog.vue'
+import SchemaSource from '@/components/pbi/SchemaSource.vue'
 import { duplicates, useConfigSection } from '@/components/pbi/useConfigSection'
 import {
   cleanRule,
@@ -231,9 +283,13 @@ interface PbiConfig {
   name: string
   workspace_id: string | null
   dataset_id: string | null
-  filters: unknown[]
-  query_modes: unknown[]
-  column_aliases: unknown[]
+  filters: any[]
+  query_modes: any[]
+  column_aliases: any[]
+  /** null = 跟隨最新版 */
+  active_model_version: number | null
+  /** MCP 實際提供的版本（後端算好，考慮了跟隨最新版） */
+  serving_model_version: number | null
 }
 interface Version {
   id: string
@@ -241,6 +297,8 @@ interface Version {
   name: string | null
   model_description: string | null
   pbi_config_id: string | null
+  derived_from_version: number | null
+  is_serving: boolean
   table_count: number
   relationship_count: number
   uploaded_at: string
@@ -262,19 +320,51 @@ const config = ref<PbiConfig | null>(null)
 const basicForm = ref({ workspace_id: '', dataset_id: '' })
 const basicSaving = ref(false)
 
-// 表名／欄位名下拉選單的來源（最新一版語意模型），還沒上傳模型時退回手動輸入
+// 表名／欄位名下拉選單的來源，預設是 MCP 提供中的版本；還沒上傳模型時退回手動輸入。
+// schemaVersion 為 null 代表跟著提供中的版本，管理員也可以先切到還沒上線的版本調設定。
 const schemaTables = ref<SchemaTable[]>([])
+const schemaVersion = ref<number | null>(null)
 const tableNames = computed(() => schemaTables.value.map((t) => t.table))
-const schemaHint = computed(() =>
-  schemaTables.value.length ? '' : '尚未上傳語意模型，資料表與欄位需要手動輸入名稱。',
-)
 
 async function loadSchema() {
   try {
-    const { data } = await http.get(`/pbi-configs/${configId}/schema`)
+    const params = schemaVersion.value === null ? {} : { version: schemaVersion.value }
+    const { data } = await http.get(`/pbi-configs/${configId}/schema`, { params })
     schemaTables.value = data.tables
   } catch {
     // 下拉選單只是輔助，抓不到就讓管理員手動輸入
+  }
+}
+watch(schemaVersion, loadSchema)
+
+const servingVersion = computed(() => config.value?.serving_model_version ?? null)
+const followLatest = computed(() => config.value?.active_model_version == null)
+const versionNumbers = computed(() => versions.value.map((v) => v.model_version))
+
+// 只更新版本相關欄位，不重跑 load()：load() 會把篩選規則等分頁還沒存的修改洗掉
+async function refreshServing() {
+  try {
+    const { data } = await http.get(`/pbi-configs/${configId}`)
+    if (config.value) {
+      config.value.active_model_version = data.active_model_version
+      config.value.serving_model_version = data.serving_model_version
+    }
+  } catch {
+    // 顯示用，失敗不影響操作
+  }
+}
+
+async function setServing(version: number | null) {
+  try {
+    const { data } = await http.put(`/pbi-configs/${configId}/active-version`, { model_version: version })
+    if (config.value) {
+      config.value.active_model_version = data.active_model_version
+      config.value.serving_model_version = data.serving_model_version
+    }
+    ElMessage.success(data.message)
+    await Promise.all([loadVersions(), loadSchema()])
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.detail ?? '切換失敗')
   }
 }
 
@@ -488,6 +578,7 @@ async function handleUpload() {
     fileName.value = ''
     fileList.value = []
     rawJson.value = ''
+    await refreshServing()
     await Promise.all([loadVersions(), loadSchema()])
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail ?? '上傳失敗')
@@ -501,6 +592,10 @@ async function loadVersions() {
   try {
     const res = await http.get('/model/versions', { params: { pbi_config_id: configId } })
     versions.value = res.data
+    // 下拉選單正在看的版本被刪掉了，退回提供中的版本
+    if (schemaVersion.value !== null && !versionNumbers.value.includes(schemaVersion.value)) {
+      schemaVersion.value = null
+    }
   } finally {
     loadingVersions.value = false
   }
@@ -568,17 +663,71 @@ async function saveDescription() {
 }
 
 async function deleteVersion(row: Version) {
+  const warning = row.is_serving
+    ? `版本 ${row.model_version} 是 AI 目前拿到的版本，刪除後會改提供剩下的最新版。確定刪除？`
+    : `確定刪除版本 ${row.model_version}？刪除後無法復原。`
+  try {
+    await ElMessageBox.confirm(warning, '刪除版本', {
+      confirmButtonText: '刪除',
+      cancelButtonText: '取消',
+      confirmButtonClass: 'el-button--danger',
+      type: 'warning',
+    })
+  } catch {
+    return
+  }
   try {
     await http.delete(`/model/versions/${row.id}`)
     ElMessage.success(`版本 ${row.model_version} 已刪除`)
     delete versionDetails.value[row.id]
+    await refreshServing()
     await Promise.all([loadVersions(), loadSchema()])
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail ?? '刪除失敗')
   }
 }
 
+function onVersionCommand(cmd: string, row: Version) {
+  if (cmd === 'serve') setServing(row.model_version)
+  else if (cmd === 'desc') openDescDialog(row)
+  else if (cmd === 'export') exportVersion(row)
+  else if (cmd === 'delete') deleteVersion(row)
+}
+
+const deriveDialog = ref({ visible: false, chunkId: '', version: 0 })
+
+function openDerive(row: Version) {
+  deriveDialog.value = { visible: true, chunkId: row.id, version: row.model_version }
+}
+
+async function onDerived() {
+  await refreshServing()
+  await Promise.all([loadVersions(), loadSchema()])
+}
+
 onMounted(async () => {
   await Promise.all([load(), loadVersions(), loadSchema()])
 })
 </script>
+
+<style scoped>
+.card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.serving {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+}
+.hint {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
+  margin-top: 4px;
+}
+</style>
