@@ -1,7 +1,7 @@
 <template>
   <el-card>
     <el-alert type="info" :closable="false" style="margin-bottom: 16px">
-      <template #title>只保留最近 90 天的紀錄，涵蓋 /dashboard、/mcp、/mcp-tokens、/api 等有身份驗證的存取。Ticket 兌換失敗也會記錄（查無此 ticket 除外）；有 get_query_ticket 卻完全沒有對應的兌換紀錄，代表請求根本沒送到 server（通常是使用者端的權限或網路限制）。</template>
+      <template #title>只保留最近 90 天的紀錄，涵蓋 /dashboard、/mcp、/mcp-tokens、/api 等有身份驗證的存取。Ticket 兌換失敗也會記錄（查無此 ticket 除外）；有 get_query_ticket 卻完全沒有對應的兌換紀錄，代表請求根本沒送到 server（通常是使用者端的權限或網路限制）。伺服器查詢（/mcp/run_query）會記下實際執行的 DAX；腳本查詢的 DAX 是 skill 領 ticket 時自行申報的（記在領取與兌換兩筆），無法保證與實際查詢一致。點「DAX」查看。</template>
     </el-alert>
 
     <div style="display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap">
@@ -36,7 +36,18 @@
           <el-tag size="small" :type="authMethodTag(row.auth_method)">{{ authMethodLabel(row.auth_method) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="path" label="路徑" min-width="160" />
+      <el-table-column label="路徑" min-width="160">
+        <template #default="{ row }">
+          {{ row.path }}
+          <!-- run_query 是實際執行的 DAX；get_query_ticket／ticket 兌換是 skill 自行申報的 -->
+          <el-popover v-if="row.query_text" placement="left" :width="520" trigger="click">
+            <template #reference>
+              <el-button size="small" link type="primary" style="margin-left: 6px">DAX</el-button>
+            </template>
+            <pre class="dax-text">{{ row.query_text }}</pre>
+          </el-popover>
+        </template>
+      </el-table-column>
       <el-table-column label="結果" min-width="160">
         <template #default="{ row }">
           <el-tag v-if="row.error" size="small" type="danger">失敗</el-tag>
@@ -76,6 +87,7 @@ interface AccessLog {
   ip_address: string | null
   detail: string | null
   error: string | null
+  query_text: string | null
   created_at: string
 }
 
@@ -164,3 +176,14 @@ onMounted(async () => {
   await Promise.all([load(), loadConfigNames()])
 })
 </script>
+
+<style scoped>
+.dax-text {
+  margin: 0;
+  max-height: 360px;
+  overflow: auto;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+</style>

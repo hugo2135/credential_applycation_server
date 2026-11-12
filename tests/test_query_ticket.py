@@ -37,14 +37,17 @@ def _set_credentials(client, admin_token, user_id):
     assert res.status_code == 200
 
 
-async def _issue_ticket(live_server, access_token, pbi_config_id):
+async def _issue_ticket(live_server, access_token, pbi_config_id, dax=None):
+    args = {"pbi_config_id": pbi_config_id}
+    if dax is not None:
+        args["dax"] = dax
     async with streamablehttp_client(
         f"{live_server}/mcp/",
         headers={"Authorization": f"Bearer {access_token}"},
     ) as (read_stream, write_stream, _):
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
-            result = await session.call_tool("get_query_ticket", {"pbi_config_id": pbi_config_id})
+            result = await session.call_tool("get_query_ticket", args)
             assert not result.isError
             return json.loads(result.content[0].text)
 
@@ -89,6 +92,30 @@ async def test_redeem_ticket_returns_token_once(
     # 第二次用同一張 ticket 必須失敗（單次使用）
     res = client.post("/api/ticket/redeem", json={"ticket": payload["ticket"]})
     assert res.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_declared_dax_is_logged_on_issue_and_redeem(
+    live_server, client, admin_token, mcp_access_token, fake_azure,
+):
+    """edge 模式領 ticket 時申報的 DAX，要出現在領取與兌換兩筆存取紀錄裡；不帶也照常發 ticket。"""
+    access_token, pbi_config_id, user_id = mcp_access_token
+    _set_credentials(client, admin_token, user_id)
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    payload = await _issue_ticket(live_server, access_token, pbi_config_id, dax="  EVALUATE T  ")
+    assert client.post("/api/ticket/redeem", json={"ticket": payload["ticket"]}).status_code == 200
+    await _issue_ticket(live_server, access_token, pbi_config_id)  # 舊 skill 不帶 dax
+
+    users = client.get("/api/admin/users", headers=headers).json()
+    email = next(u["email"] for u in users if u["id"] == user_id)
+    logs = client.get("/api/admin/access-logs", headers=headers, params={"email": email}).json()
+    issued = [l for l in logs if l["path"] == "/mcp/get_query_ticket"]
+    redeemed = [l for l in logs if l["path"] == "/api/ticket/redeem"]
+    # 新到舊排序：最新那筆是沒帶 dax 的
+    assert issued[0]["query_text"] is None
+    assert issued[1]["query_text"] == "EVALUATE T"
+    assert redeemed[0]["query_text"] == "EVALUATE T"
 
 
 def test_redeem_invalid_ticket(client):

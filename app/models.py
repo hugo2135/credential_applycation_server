@@ -45,6 +45,10 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     expires_at = Column(DateTime, nullable=True)
     failed_login_attempts = Column(Integer, default=0, nullable=False)
+    # MCP 查詢走哪條路（見 app/server_query.py）："edge" = skill 拿 ticket 自己打 Power BI，
+    # "server" = 呼叫 run_query 由 server 代查。設在使用者層級，管理員可以先拿自己的帳號
+    # 測 server 模式，再分批切換，不會一切換就讓所有人一起查不了。
+    query_execution = Column(String, default="edge", nullable=False)
 
 
 class UserPbiConfig(Base):
@@ -144,6 +148,9 @@ class AccessTicket(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     expires_at = Column(DateTime, nullable=False, index=True)
     used_at = Column(DateTime, nullable=True)
+    # skill 領 ticket 時自行申報要跑的 DAX（選填），兌換時一併寫進 access log。
+    # 只是申報：token 換出去之後實際查了什麼伺服器看不到，可信的紀錄只有 server 模式。
+    query_text = Column(Text, nullable=True)
 
 
 class Bookmark(Base):
@@ -186,4 +193,20 @@ class AccessLog(Base):
     # null 代表成功。目前只有 ticket redeem 會記失敗：ticket 拿得到卻沒換到 token 時，
     # 這是 server 端唯一能分辨「兌換失敗」跟「請求根本沒送到」的線索。
     error = Column(Text, nullable=True)
+    # server 查詢模式（run_query）實際執行的 DAX。edge 模式查詢在 client 端執行，
+    # server 看不到內容，只有 server 模式能留下「誰查了什麼」
+    query_text = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class SystemSetting(Base):
+    """管理員在 /admin/settings 調整的系統參數（key-value，值存 JSON）。
+
+    只放非機密設定。之後 Azure AD 代管用的管理 app 憑證刻意放 .env 不放這裡：
+    那組憑證能在租戶裡建立／修改 SP，做成網頁可改會讓管理後台密碼外洩的影響範圍
+    從這套系統擴大到整個租戶。讀取與預設值見 app/system_settings.py。"""
+    __tablename__ = "system_settings"
+
+    key = Column(String, primary_key=True)
+    value = Column(JSON, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

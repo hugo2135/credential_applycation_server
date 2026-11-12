@@ -58,7 +58,7 @@
 
 ## MCP Tools
 
-Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞），以下是查詢相關三個 tool 的完整 input/output 定義（書籤的三個 tool 見後面「書籤」一節）：
+Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞），以下是查詢相關四個 tool 的完整 input/output 定義（書籤的三個 tool 見後面「書籤」一節）。執行查詢有兩種方式（v2.0），見「兩種查詢方式」一節：`get_query_ticket` 與 `run_query` 每位使用者只會用到其中一個。
 
 ### `list_models`
 
@@ -74,6 +74,7 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
   "model_version": 5,
   "model_description": "以 Markdown 撰寫的模型概覽說明，管理員填的，可能是 null",
   "table_count": 12,
+  "query_execution": "edge",
   "query_modes": [
     { "mode_id": "summary", "name": "摘要模式", "description": "只看高階彙總表，可能是 null" }
   ]
@@ -98,6 +99,7 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
   "workspace_id": "e6833b06-998f-45c2-a6c7-43a402d6e12e",
   "dataset_id": "2097b78b-b3df-40f9-9478-680e324acd50",
   "query_mode_id": "summary",
+  "query_execution": "edge",
   "filters": [
     {
       "filterId": "exclude-return-orders",
@@ -158,7 +160,62 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
 
 **欄位本身的別名（v1.5 新增）**：每組另外有一個 `aliases`（跟 `values[].aliases` 不同層），是**欄位本身**的其他說法。使用者提到這些詞（例如「各地區的銷售」裡的「地區」）時，把它當成在指 `table[column]` 這個欄位（例如 `Orders[region]`），用來決定分組、篩選或輸出哪個欄位，而不是自己去猜欄位名稱。這個 key 一定存在，沒設定時是空陣列；同一組也可能只設欄位別名、`values` 是空陣列。舊版 skill 不讀這個欄位也不會壞，只是用不到這項對照。
 
+### 兩種查詢方式（v2.0 新增）
+
+`list_models` 與 `get_model_detail` 都會回傳 `query_execution`，決定 DAX 生成後**怎麼執行**。這是管理員在 `/admin/users` 依使用者設定的（同一個人的所有模型都一樣），skill 不能自己選：
+
+| `query_execution` | 執行方式 | skill 要做的事 |
+|---|---|---|
+| `"edge"`（預設） | 查詢腳本拿一次性 ticket 兌換 token，自己打 Power BI | 呼叫 `get_query_ticket`（v2.0 起請帶 `dax`），流程同 v1.x |
+| `"server"` | 伺服器用使用者的服務主體代查，結果直接回給 AI | 呼叫 `run_query(pbi_config_id, dax)`，**不需要查詢腳本、不需要任何網路設定** |
+
+用錯的那一個會回 tool error，並提示改用另一個——所以就算 skill 沒讀 `query_execution`、先試 `get_query_ticket`，也會被明確引導到 `run_query`。
+
+**相容性**：既有使用者預設都是 `edge`，沒更新的 skill 不受影響。管理員把某位使用者切到 `server` 之前，必須先確認他用的 skill 已支援 `run_query`，否則他會卡在 `get_query_ticket` 被拒絕。
+
+`server` 模式的好處：client 端不需要 code execution（Gemini、手機 app 等沒有沙盒的 client 也能查），也不用把 `<SITE_DOMAIN>`／`api.powerbi.com` 加進沙盒的 network egress 白名單——那是 edge 模式最常出問題的地方（見文末疑難排解）。代價是查詢結果會整包進入對話上下文，所以有列數上限（見下方 `truncated`）。
+
+### `run_query`（v2.0 新增，僅 `query_execution = "server"`）
+
+由伺服器代為執行 DAX 並回傳結果。
+
+**輸入**：`pbi_config_id: str`，`dax: str`（完整的 DAX 查詢，`EVALUATE ...`）
+
+**輸出**：`dict`
+```json
+{
+  "tables": [
+    {
+      "columns": ["Orders[region]", "[Total Sales]"],
+      "rows": [
+        { "Orders[region]": "North", "[Total Sales]": 12345.6 },
+        { "Orders[region]": "South", "[Total Sales]": 9876.5 }
+      ],
+      "row_count": 2,
+      "truncated": false
+    }
+  ],
+  "max_rows": 1000
+}
+```
+- `tables`：每個 `EVALUATE` 一筆，`rows` 是 Power BI executeQueries 原樣的列（key 是 `Table[Column]` 或量值名稱，null 值會保留）。
+- **`truncated: true`** 代表結果超過伺服器的列數上限 `max_rows`（管理員在 `/admin/settings` 調整，預設 1000），`rows` 只有前 `max_rows` 列、`row_count` 是實際列數。**請告知使用者結果不完整**，並改寫成彙總、加篩選或 `TOPN` 再查；不要拿截斷的資料做加總或排名結論。
+
+**失敗情況**（皆為 tool error）：
+
+| 訊息開頭 | 原因 | skill 該怎麼做 |
+|---|---|---|
+| `DAX 執行錯誤：…` | DAX 本身有問題，後面附 Power BI 的原始說明（例如 `Cannot find table 'X'`） | 依訊息修正 DAX 後重試 |
+| `查詢超過 N 秒仍未完成…` | DAX 太重 | 簡化（先彙總、加篩選、`TOPN`）後重試 |
+| `目前查詢量較大，排隊逾時…` | 伺服器同時查詢數已滿 | 稍後重試，不要立刻連續重送 |
+| `Azure AD 驗證失敗…`、權限／找不到 workspace 相關 | 帳號或設定問題，不是 DAX 能解決的 | 告知使用者聯絡管理員，不要重試 |
+| `你的帳號目前是由查詢腳本自行執行查詢…` | 這位使用者是 `edge` | 改用 `get_query_ticket` |
+
+伺服器查詢會把實際執行的 DAX 記進管理員的存取歷史（`/mcp/run_query`）。edge 模式只能記下 skill 領 ticket 時自行申報的 DAX（見 `get_query_ticket` 的 `dax` 參數），伺服器無法驗證 token 換出去之後實際查了什麼，所以可信的稽核紀錄只有 server 模式。
+
 ### `get_query_ticket`
+
+> v2.0 起只適用 `query_execution = "edge"` 的使用者；`server` 的使用者呼叫會得到 tool error「你的帳號已改由伺服器執行查詢…請改用 run_query」。
 
 > 🔴 **Breaking change（2026-08）**：這支 tool 取代了原本的 `get_powerbi_token`。舊的 tool 已移除，呼叫它會得到 unknown tool 錯誤。Skill 端必須配合修改，見下方「Skill 端要怎麼改」。
 
@@ -166,7 +223,9 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
 
 **為什麼要改**：實測發現舊設計會讓 access token 完整進入對話上下文——tool 回傳值本身就會被記錄，而且 Skill 若把 token 寫成檔案（`Write` 工具），token 又會在工具呼叫裡再出現一次。等於一個有效一小時的 Power BI 憑證留在對話紀錄裡，對話被匯出、共享或存進第三方時就會外流。改成發 ticket 之後，真正的 token 只存在於查詢腳本的行程記憶體，不會進上下文、也不落地。
 
-**輸入**：`pbi_config_id: str`
+**輸入**：
+- `pbi_config_id: str`
+- `dax: str`（選填，v2.0 新增）：這次要執行的完整 DAX，要跑好幾段就全部串在一起送。會記進管理員的存取歷史（領 ticket 與腳本兌換兩筆紀錄都會有），作為 edge 模式的查詢紀錄。**請一律帶上**；不帶仍然能拿到 ticket（舊 skill 相容），只是管理員看不到查了什麼。帶的應該是腳本實際要跑的 DAX，生成後又修改的話，以重新領 ticket 時帶的為準。
 
 **輸出**：`dict`
 ```json
@@ -238,7 +297,7 @@ Content-Type: application/json
 **關鍵原則：ticket 可以進上下文，token 不行。** 所以兌換動作一定要發生在**腳本內部**，不能由 Claude 拿到 token 之後再傳給腳本——那樣 token 就又回到上下文裡了。
 
 ```
-Claude ──MCP──> get_query_ticket(pbi_config_id)  →  { ticket, redeem_url, expires_in }
+Claude ──MCP──> get_query_ticket(pbi_config_id, dax)  →  { ticket, redeem_url, expires_in }
 Claude ──────>  execute_dax_query.py <ticket> <workspace_id> <dataset_id> <dax檔> <輸出檔>
                         │
                         ├─ ① POST {redeem_url}  {"ticket": ...}   →  access_token（只在記憶體）
@@ -301,7 +360,7 @@ Content-Type: application/json
 
 使用者常用的查詢可以存在 server 的帳號裡，換電腦、換 client、開新對話都還在。使用者也能在申請程式的 `/bookmarks` 頁面查看、刪除、匯出分享給同事。舊版 skill 不接這三個 tool 也完全不受影響。
 
-**執行書籤時沒有任何新的取得 token 路徑**：書籤只是存起來的 DAX 字串，執行流程跟一般查詢一樣——`get_query_ticket` 拿 ticket，再把書籤的 `dax` 交給查詢腳本。
+**執行書籤時沒有任何新的執行路徑**：書籤只是存起來的 DAX 字串，執行流程跟一般查詢一樣依 `query_execution`——`edge` 用 `get_query_ticket` 拿 ticket 再把書籤的 `dax` 交給查詢腳本，`server` 直接把 `dax` 交給 `run_query`。
 
 ### `list_bookmarks`
 
@@ -407,20 +466,27 @@ Content-Type: application/json
 Skill 依現有推理邏輯（辨識資料表 → 驗證關聯 → 抽欄位/量值 → 套用篩選集 → 生成 DAX）產出 DAX 查詢
        │
        ▼
-呼叫 get_query_ticket(pbi_config_id) 拿一張 ticket（每次查詢都要重拿，不要快取）
+依 get_model_detail 回傳的 query_execution 分流
        │
-       ▼
-把 ticket 交給查詢腳本，腳本內部：
-       ├─ ① POST {redeem_url} 用 ticket 換 access_token（只存在記憶體）
-       └─ ② 直接對 Power BI executeQueries API 發送 DAX 查詢（不經過我們的 server）
+       ├─ "server" ─▶ 呼叫 run_query(pbi_config_id, dax) ─▶ 直接拿到結果（truncated 時告知使用者），呈現給使用者
        │
-       ▼
-Power BI 直接把查詢結果回給腳本，腳本只輸出結果（token 不外流），呈現給使用者
+       └─ "edge"
+              │
+              ▼
+       呼叫 get_query_ticket(pbi_config_id, dax) 拿一張 ticket（每次查詢都要重拿，不要快取）
+              │
+              ▼
+       把 ticket 交給查詢腳本，腳本內部：
+              ├─ ① POST {redeem_url} 用 ticket 換 access_token（只存在記憶體）
+              └─ ② 直接對 Power BI executeQueries API 發送 DAX 查詢（不經過我們的 server）
+              │
+              ▼
+       Power BI 直接把查詢結果回給腳本，腳本只輸出結果（token 不外流），呈現給使用者
 ```
 
 跟 legacy 流程相比，**Skill 完全不需要碰觸 PBI_MASK_KEY**（那個概念在 MCP 流程裡整個消失），也不需要寫任何本機檔案（`pbi_query/dax_query.txt`、`query_result.csv` 這類本機快取檔可以整個拿掉，除非你想保留「結果落地到使用者專案資料夾」這個體驗，那就是 Skill 自己用 Write 工具把查詢結果寫成檔案）。**唯一絕對不能落地的是 access token**——見上方「Skill 端要怎麼改」。
 
-兩邊相同的是：**Azure AD access token 最終都是由 Skill 自己拿去直接呼叫 Power BI**，我們的 server 從不代理查詢。差別只在「怎麼拿到這個 token」——legacy 是 PBI_MASK_KEY 換，MCP 版是 OAuth 連線 + 一次性 ticket 兌換。
+edge 模式跟 legacy 相同的是：**Azure AD access token 最終都是由 Skill 自己拿去直接呼叫 Power BI**，server 不代理查詢，差別只在「怎麼拿到這個 token」——legacy 是 PBI_MASK_KEY 換，MCP 版是 OAuth 連線 + 一次性 ticket 兌換。server 模式則完全不經過 token，skill 只送 DAX、收結果。
 
 ---
 

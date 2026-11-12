@@ -36,7 +36,8 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 - `datetime.now(timezone.utc)`：JWT 時間戳**必須**用這個，`utcnow()` 在 UTC+8 環境會讓 exp 提前 7 小時失效。
 - `client_secret` 以 AES-256-GCM 加密存 DB，key 衍生自 `SERVER_JWT_SECRET`。
 - PBI_MASK_KEY 明文只在產生時回傳一次，DB 只存 SHA-256 hash；OAuth refresh token、MCP Personal Access Token（`personal_access_tokens` 表）比照辦理，只存 hash。`mcp.py` 的 `_JwtTokenVerifier` 驗證時先試 OAuth JWT，失敗再退回查 PAT hash——兩種 token 都能通過 `/mcp` 的身份驗證。
-- **查詢本身由呼叫端直接打 Power BI executeQueries**，server 不代理查詢——這是刻意設計，早期版本讓 server 代跑查詢，同步阻塞的網路呼叫在並發時會卡住整個 event loop（MCP tool 沒有 FastAPI 那種自動 thread pool offload）。
+- **查詢有兩種執行方式**（v2.0），依使用者設定 `User.query_execution`：`edge`（預設）由呼叫端拿 ticket 直接打 Power BI executeQueries；`server` 由 MCP tool `run_query` 代查（`app/server_query.py`）。早期版本也讓 server 代跑過查詢，後來拿掉，因為當時在 MCP tool 裡用同步網路呼叫，並發時卡住整個 event loop（MCP tool 沒有 FastAPI 那種自動 thread pool offload）。所以 server 查詢有硬規則：打 Power BI **一律 `httpx.AsyncClient`**、MSAL 換 token 丟 `anyio.to_thread.run_sync`、同時查詢數用 `CapacityLimiter` 限流、整段含排隊有 timeout、回傳列數有上限，而且 **await 期間不握 DB session**（`run_query` 先讀完值、關 session，查完再開新 session 寫 log）。兩種模式互斥：`server` 使用者呼叫 `get_query_ticket` 會被拒、`edge` 使用者呼叫 `run_query` 也會被拒，拒絕訊息會指向另一個 tool。模式刻意設在**使用者層級**而不是 PBI 設定層級——管理員可以先拿自己帳號測，再分批切換，不會一切換就全部人查不了。legacy `/api/token` 不看這個設定。
+- **系統設定**（`app/system_settings.py`、`SystemSetting` 表、`/admin/settings`）：key-value，值存 JSON，每個 key 在 `SETTINGS` 裡定義預設值與驗證範圍，DB 沒那一列就用預設值（新增設定不用 migration），每次現讀、改完立即生效。目前只有伺服器查詢的並行數／列數上限／timeout 與新使用者預設查詢方式。**只放非機密設定**——之後 Azure AD 代管的管理 app 憑證要放 `.env`，不能做成網頁可改（管理後台密碼外洩時影響範圍會擴大到整個租戶的 SP）。
 - MCP tool **不回傳 access token，只回傳一次性 ticket**（`get_query_ticket`，短效、單次使用、`access_tickets` 表只存 hash），由呼叫端的查詢腳本自己打 `POST /api/ticket/redeem` 兌換。動機是實測發現舊的 `get_powerbi_token` 會讓有效一小時的 Power BI 憑證完整進入對話上下文——tool 回傳值本身記一次，client 端把它 `Write` 成檔案時再記一次，而且還會落地到使用者的專案資料夾。**`access_tickets` 刻意不存 access token**：跟 Azure AD 換 token 是在 redeem 當下才做，所以那張表任何時候都不含可直接使用的憑證。MSAL 那個同步阻塞呼叫移到 redeem 端點後也不再需要 `anyio.to_thread.run_sync`——一般 FastAPI 端點本來就跑在 thread pool。
 - `/api/ticket/` 必須列在 `main.py` 的 `_IP_WHITELIST_EXEMPT_PREFIXES`：那是給使用者機器／沙盒上的腳本呼叫的，不可能在內網，安全性靠 ticket 本身而不是 IP。另外 skill 端的沙盒除了 `api.powerbi.com` 之外，還要把 `SITE_DOMAIN` 加進 Claude 的 network egress 白名單才能兌換（見 `docs/skill-integration.md`）。
 - `User.client_secret_expires_at` 是管理員手動填的 Azure AD secret 到期日（選填）。Azure 的 client secret 最長 24 個月且到期時不會主動通知，症狀只是使用者突然查不了、錯誤訊息看不出原因，所以 `/admin/users` 會在剩 30 天內或已過期時標紅/標黃。之後若真的去串 Microsoft Graph，可以改成從 application 的 `passwordCredentials.endDateTime` 自動同步，欄位不用動。
@@ -46,7 +47,7 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 - `PbiConfig.filters` 是管理員在 `/admin/pbi-configs` 維護的篩選規則（JSON 陣列），透過 `get_model_detail` 交給 skill 端，取代原本 skill 本機 `filters/*.json` 的設計，格式與比對邏輯見 `docs/skill-integration.md`。
 - 裸路徑 `/mcp`（沒有尾斜線）**不能**用 HTTP 307 轉址到 `/mcp/` 處理——部分 MCP client（例如 Gemini）跟隨轉址重新發送請求時不會保留 `Authorization` header，會導致認證失敗。`main.py` 的 `_McpTrailingSlashFix` 改成在 ASGI 層、Starlette Router 判斷路由之前，直接把路徑內部改寫成 `/mcp/`，同一個請求處理完，client 端完全不會看到任何轉址；這個 wrapper 必須包住整個 `app`（不能只包 `/mcp` 掛載的 sub-app），因為 Router 判斷要不要進到 Mount 這一步，發生在 sub-app 被呼叫之前。
 - 存取歷史（`access_logs` 表）在三個既有身份驗證點各自補一行寫入（`auth.py` 的 `_require_user`、`mcp.py` 的 `_JwtTokenVerifier`、`credential.py` 的 `_resolve_user`），共用 `app/access_log.py` 的 `record_access()`，只記錄驗證成功的請求。例外是 `/api/ticket/redeem`：失敗也記（`AccessLog.error` 放原因，null 代表成功），讓管理員分辨「兌換失敗」和「請求根本沒送到」；但查無此 ticket 不記，因為端點不需登入，記了等於讓任何人灌 DB。只留 90 天，`main.py` 的 lifespan 開一個背景 task 每天清一次舊資料，沒有另外掛排程服務。
-- `mcp.py` 的存取紀錄分兩層：`_JwtTokenVerifier` 每個 HTTP request 都記一筆通用的 `path="/mcp"`（含 `initialize`/`list_tools` 這些協定層呼叫，用來看背景連線活動）；`_log_tool_access()` 額外在 `list_models`/`get_model_detail`/`get_query_ticket` 三個 tool 各自呼叫，記一筆 `path="/mcp/{tool_name}"`，才看得出「哪個使用者觸發了哪個功能」。同一次真正的 tool 呼叫因此會有兩筆紀錄，這是刻意的（各自用途不同），不是重複寫入的 bug。 `AccessLog.detail` 放這次操作的對象（目前是 `pbi_config_id`），`get_model_detail`/`get_query_ticket`/ticket redeem 都會帶；`list_models` 沒有特定對象所以留空。查詢是在 client 端直接打 Power BI 的，server 這邊唯一留得下的線索就是這筆紀錄，要跟 Power BI 自己的 activity log 對起來還原「誰查了哪個模型」就靠這欄。
+- `mcp.py` 的存取紀錄分兩層：`_JwtTokenVerifier` 每個 HTTP request 都記一筆通用的 `path="/mcp"`（含 `initialize`/`list_tools` 這些協定層呼叫，用來看背景連線活動）；`_log_tool_access()` 額外在每個 tool 各自呼叫，記一筆 `path="/mcp/{tool_name}"`（`run_query` 是查完才記，成功失敗都記，並把 DAX 存進 `AccessLog.query_text`；edge 模式的 `get_query_ticket` 有選填參數 `dax`，存在 `AccessTicket.query_text`，領取與兌換兩筆 log 都會帶——但那是 skill **自行申報**的，token 換出去後實際查了什麼伺服器看不到，可信的「誰查了什麼」只有 server 模式。`dax` 刻意不設必填：舊 skill 會壞，而且必填也擋不了申報假的），才看得出「哪個使用者觸發了哪個功能」。同一次真正的 tool 呼叫因此會有兩筆紀錄，這是刻意的（各自用途不同），不是重複寫入的 bug。 `AccessLog.detail` 放這次操作的對象（目前是 `pbi_config_id`），`get_model_detail`/`get_query_ticket`/ticket redeem 都會帶；`list_models` 沒有特定對象所以留空。查詢是在 client 端直接打 Power BI 的，server 這邊唯一留得下的線索就是這筆紀錄，要跟 Power BI 自己的 activity log 對起來還原「誰查了哪個模型」就靠這欄。
 - `/mcp` 的驗證點（`TokenVerifier.verify_token()`）介面只給 token 字串、拿不到 `Request` 物件，IP／HTTP method 要記錄下來得靠 `main.py` 的 `_McpTrailingSlashFix`（ASGI 層，比 FastAPI 的 Request 更早）從原始 scope 讀出來、存進 `app/access_log.py` 的 contextvar，`_JwtTokenVerifier` 再讀出來寫進 log。這個 contextvar 是 per-task 的，並發請求之間不會互相污染。
 - `PbiConfig.query_modes`（資料曝光範圍模式）跟 `filters` 是兩個獨立機制、疊加而非取代：`get_model_detail` 帶 `mode_id` 時只把該模式的 `filters` 包成一筆 `alwaysApply=true` 的 filter profile 塞進既有 `filters` 陣列尾端，skill 端原本的比對邏輯完全不用改；`mode.tables` 為空代表不限制表範圍（不是「全部不給看」）。存取限制沿用既有的 `UserPbiConfig` 指派機制，沒有另外做使用者-模式層級的授權——同一份資料要給不同部門看不同範圍，作法是管理員建立多個 `PbiConfig`（各自定義相關 `query_modes`）分別指派，不是同一個設定裡限制特定使用者只能用某些模式。
 - `get_model_detail` 用 `_load_model_chunk()`（`lru_cache`，上限 16 筆）快取語意模型的 `relationships`/`tables`——單一模型實測約 95KB JSON，每次呼叫都讓 SQLite 讀 TEXT 再 `json.loads` 在小 VM 上是實際負擔。**快取 key 刻意只有 `(pbi_config_id, model_version)`**：只快取上傳後就不再變的模型結構，`filters`/`query_modes`/`column_aliases`/`workspace_id`/`dataset_id` 一律每次從 `config` 物件現讀，所以管理員改完立刻生效。若把整包回應照 `model_version` 快取就會出事——那幾個欄位改了但版本沒變，skill 會一直拿到舊的篩選規則。上傳新版本會讓 key 自然改變，不需要主動失效——前提是**版本號不重複使用、版本內容不就地修改**（見下方「語意模型版本」）。另外查版本號時只 `select model_version` 一欄，整列 select 會把要避開的大 JSON 又讀出來；`_load_model_chunk` 找不到時**丟例外而不是回傳 None**，因為 `lru_cache` 不快取例外，而版本全刪後重新上傳會讓版本號從 1 重來、撞到被快取的 None。
@@ -59,30 +60,29 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
   - DAX 引用分析是啟發式（去掉字串／註解、`Name(` 視為函式呼叫、沒加表名的 `[X]` 先當量值），前端 `admin-frontend/src/components/pbi/modelDeps.ts` 做即時預覽與連帶勾選，後端 `find_broken_measures()` 存檔時再檢查一次，**兩邊規則要一起改**。連帶勾選只從管理員手動勾的量值往下展開；因引用被刪除的表而受影響的量值預設不勾（量值在 Power BI 上照樣能算）。
   - PBI 設定的篩選規則／查詢模式／欄位別名屬於設定、不屬於版本，刪減時只列出引用提醒不自動改——指定了提供版本時，改設定會立刻影響線上那一版。
 - 「複製 PBI 設定」（`POST /pbi-configs/{id}/duplicate`）連同來源**目前提供中**的那一版 `ModelChunk` 一起複製成新設定的版本 1，複製後兩份設定完全獨立（物理複製，不是共用連結）——上游語意模型變動時兩邊都要各自重新上傳，不會自動同步。
-- **查詢權限檢測**（`app/query_check.py`，`POST /api/admin/users/{id}/query-check`）用使用者的 SP 對已指派模型跑 `EVALUATE ROW("ok", 1)`，結果記在 `UserPbiConfig.check_status/check_message/checked_at`（「使用者 × 模型」層級，因為同一人可能 A 模型通、B 模型不通）。這是 server 唯一自己打 Power BI 的地方，**不違反「server 不代理查詢」**——那條規則是怕 MCP tool 的同步呼叫卡住 event loop；這裡是管理員手動觸發、跑在一般 FastAPI 同步端點（thread pool），跟 ticket redeem 同理。結果會在三種情況被 `reset_checks()` 重置成未檢測：改 Azure AD 憑證、PBI 設定的 `workspace_id`/`dataset_id` **真的變動**（送一樣的值不算）。`PUT /users/{id}/pbi-configs` 因此改成差異更新（只刪被取消的、只加新的），整批刪掉重建會把沒變動的模型檢測結果一起洗掉。前端在儲存憑證／指派後自動觸發檢測；錯誤訊息第一行是白話原因、後面附原始錯誤（AADSTS 錯誤碼、Power BI 回應 body），翻譯表在 `query_check.py` 的 `_AAD_HINTS`/`_POWERBI_HINTS`。
+- **查詢權限檢測**（`app/query_check.py`，`POST /api/admin/users/{id}/query-check`）用使用者的 SP 對已指派模型跑 `EVALUATE ROW("ok", 1)`，結果記在 `UserPbiConfig.check_status/check_message/checked_at`（「使用者 × 模型」層級，因為同一人可能 A 模型通、B 模型不通）。這裡用同步 `httpx.post` 沒問題——是管理員手動觸發、跑在一般 FastAPI 同步端點（thread pool），跟 ticket redeem 同理；MCP tool 裡的 `run_query` 才必須用 async（見上方「查詢有兩種執行方式」）。錯誤翻譯表 `server_query.py` 也共用。結果會在三種情況被 `reset_checks()` 重置成未檢測：改 Azure AD 憑證、PBI 設定的 `workspace_id`/`dataset_id` **真的變動**（送一樣的值不算）。`PUT /users/{id}/pbi-configs` 因此改成差異更新（只刪被取消的、只加新的），整批刪掉重建會把沒變動的模型檢測結果一起洗掉。前端在儲存憑證／指派後自動觸發檢測；錯誤訊息第一行是白話原因、後面附原始錯誤（AADSTS 錯誤碼、Power BI 回應 body），翻譯表在 `query_check.py` 的 `_AAD_HINTS`/`_POWERBI_HINTS`。
 - **書籤**（`Bookmark` 表、`app/bookmarks.py`）由 MCP tool（`list_bookmarks`/`save_bookmark`/`delete_bookmark`）與使用者網頁（`/auth/bookmarks`，含匯出匯入）共用同一份邏輯。綁定 `pbi_config_id`，只顯示目前仍被指派的模型的書籤（取消指派是隱藏不是刪除）。`save_bookmark` 同名時**刻意不覆蓋**，回傳 `conflict` 與既有內容，tool 說明要求 AI 先問使用者、同意後才帶 `overwrite=true`。存檔時記下 `model_version`，模型升版後 `possibly_outdated=true`，skill 應改用 `question` 重新生成。每人上限 100 筆（保護小 VM）。刪除使用者或 PBI 設定時一併刪除書籤。
 
 ## 版本管理
 
-從 **v1.0** 開始要看版本。版號同時寫在兩個地方，**必須一致**：git tag（`v1.0`）與 `main.py` 的 `FastAPI(version=...)`（會顯示在 `/docs` 與 OpenAPI，是 skill 端確認自己對到哪一版的依據）。
+版號同時寫在兩個地方，**必須一致**：git tag（`v2.0`）與 `main.py` 的 `FastAPI(version=...)`（會顯示在 `/docs` 與 OpenAPI，是 skill 端確認自己對到哪一版的依據）。
 
-用語意化版本，但判斷 MAJOR 的依據是**對外契約有沒有被破壞**，不是內部改動的大小：
+**v2.0 起改成兩段式 `主版號.修正號`**（v1.x 期間是「MAJOR = 破壞契約、MINOR = 新增功能」，v1.1～v1.6 都是新增功能）：
 
 | 版號 | 什麼情況 | 例子 |
 |------|----------|------|
-| MAJOR | 破壞 skill 端契約，舊 skill 會直接壞掉 | `get_powerbi_token` 改成 `get_query_ticket`（就是 v1.0 的內容） |
-| MINOR | 純新增，舊 skill 不改也能繼續跑 | 多回 `query_modes`/`column_aliases` 欄位、`mode_id` 這種選填參數 |
-| PATCH | 修 bug、效能、文件、管理後台內部調整 | `get_model_detail` 的 cache、access log 補 `detail` 欄位 |
+| 主版號（`v2.0` → `v3.0`） | 一次重大改版：新功能、新能力，或破壞 skill 端契約的改動 | v2.0 伺服器查詢模式 |
+| 修正號（`v2.0` → `v2.1`） | hotfix：修 bug、效能、文件、管理後台小調整 | |
 
-**「對外契約」只指這三個介面**，只有它們的破壞性改動才算 MAJOR：
+主版號不再代表「一定破壞契約」，所以**每個主版號都要在 `docs/skill-integration.md` 寫清楚 skill 端要不要改**。「對外契約」指這三個介面：
 
 1. MCP tools（名稱、參數、回傳結構）
 2. `POST /api/ticket/redeem`
 3. legacy REST `/api/models`、`/api/token`
 
-管理後台 API 與前端只有我們自己用，怎麼改都不影響版號判斷。
+管理後台 API 與前端只有我們自己用，怎麼改都不算破壞契約。
 
-打 tag 的時機：`main` 到達一個「skill 端可以對著它整合」的穩定點。**MAJOR 版一定要跟 skill 端協調部署順序**——server 先上會讓還沒遷移的 skill 卡在破壞掉的那一步（v1.0 的情況是卡在拿 token）。不確定能不能同步時，考慮保留舊介面當 deprecated 別名過渡，遷移完再移除。
+打 tag 的時機：`main` 到達一個「skill 端可以對著它整合」的穩定點。**破壞契約的改動一定要跟 skill 端協調部署順序**——server 先上會讓還沒遷移的 skill 卡在破壞掉的那一步（v1.0 的情況是卡在拿 token）。不確定能不能同步時，考慮保留舊介面當 deprecated 別名過渡，遷移完再移除；或像 v2.0 的查詢模式一樣做成可逐一使用者切換、預設維持舊行為。
 
 ## 分支策略
 
@@ -128,6 +128,8 @@ app/
   bookmarks.py     書籤共用邏輯（MCP tool 與 /auth/bookmarks 共用，含匯出匯入格式）
   query_check.py   查詢權限檢測（用使用者 SP 跑最小查詢 + 錯誤翻譯）
   model_versions.py 語意模型版本：配號、目前提供哪一版、刪減項目另存新版本 + DAX 引用分析
+  server_query.py  伺服器查詢模式（run_query 的實作：async 打 Power BI、限流、timeout、列數上限）
+  system_settings.py 系統設定（/admin/settings）的預設值、驗證、讀寫
   models.py        SQLAlchemy ORM（含 OAuth 三張表 + personal_access_tokens + access_logs + access_tickets）
   database.py      SQLAlchemy 設定
   routers/
@@ -135,7 +137,7 @@ app/
     credential.py  /api（Skill legacy），也提供 acquire_powerbi_token 給 ticket redeem 用
     admin.py       /api/admin（管理員）
     oauth.py       /oauth、/.well-known（OAuth 2.1 authorization server）
-    mcp.py         /mcp（MCP server + tools：list_models/get_model_detail(mode_id?)/get_query_ticket/list_bookmarks/save_bookmark/delete_bookmark）
+    mcp.py         /mcp（MCP server + tools：list_models/get_model_detail(mode_id?)/get_query_ticket/run_query/list_bookmarks/save_bookmark/delete_bookmark）
     ticket.py      /api/ticket/redeem（一次性 ticket 換 Power BI access token，給 skill 腳本呼叫）
 admin-frontend/    Vue 3 SPA（Element Plus + Pinia）
 scripts/
@@ -164,6 +166,7 @@ docs/
                         GET /api/admin/pbi-configs/{id}/schema（預設 MCP 提供中的版本，可用 ?version= 改看別版）。畫面上的中文名稱可隨意改，JSON key 是 skill 契約不能動
 
 /admin/access-logs      存取歷史查詢／匯出（管理員）
+/admin/settings         系統設定（管理員，側欄底部、登出鈕上方；Tab：伺服器查詢，之後加 Azure AD 代管）
 ```
 
 管理員與使用者的 JWT 過期時，`admin-frontend/src/api/http.ts` 的 axios response 攔截器會在收到 401 時清除 token 並導回對應登入頁（管理員 → `/admin/login`）。**修改前端後必須執行 `npm run build --prefix admin-frontend` 重新產生 `dist/`**，否則 FastAPI 會繼續 serve 舊的靜態檔案，導致行為與原始碼不一致（例如導向錯誤的登入頁）。

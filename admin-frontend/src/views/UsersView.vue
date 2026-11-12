@@ -6,6 +6,17 @@
       <el-button size="small" type="success" @click="batchActivate(true)">批次開通</el-button>
       <el-button size="small" type="warning" @click="batchActivate(false)">批次停用</el-button>
       <el-button size="small" @click="openBatchAssign">批次指派 PBI 設定</el-button>
+      <el-dropdown trigger="click" @command="batchSetQueryExecution">
+        <el-button size="small">
+          切換查詢方式<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="server">改為伺服器查詢</el-dropdown-item>
+            <el-dropdown-item command="edge">改為腳本查詢</el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
       <el-popconfirm
         title="確定刪除這些使用者？此操作無法復原。"
         confirm-button-type="danger"
@@ -38,6 +49,13 @@
           <div v-if="row.has_credentials && secretExpiry(row)" style="margin-top: 4px">
             <el-tag :type="secretExpiry(row)!.type" size="small">{{ secretExpiry(row)!.label }}</el-tag>
           </div>
+        </template>
+      </el-table-column>
+      <el-table-column label="查詢方式" width="110" align="center">
+        <template #default="{ row }">
+          <el-tag :type="row.query_execution === 'server' ? 'primary' : 'info'" size="small" effect="plain">
+            {{ queryExecutionLabel(row.query_execution) }}
+          </el-tag>
         </template>
       </el-table-column>
       <el-table-column label="已分配語意模型" min-width="180">
@@ -200,6 +218,39 @@
         </el-button>
       </el-tab-pane>
 
+      <el-tab-pane label="查詢方式" name="queryExecution">
+        <el-radio-group v-model="settingsDialog.queryExecution" class="mode-options">
+          <el-radio value="edge" border>
+            <b>腳本查詢</b>
+            <span class="mode-desc">AI 端的查詢腳本拿一次性 ticket 自己連 Power BI，沙盒要放行網路</span>
+          </el-radio>
+          <el-radio value="server" border>
+            <b>伺服器查詢</b>
+            <span class="mode-desc">由伺服器代查並把結果交給 AI，不需要網路設定；DAX 會記進存取歷史</span>
+          </el-radio>
+        </el-radio-group>
+        <el-alert
+          v-if="settingsDialog.queryExecution === 'server'"
+          type="warning"
+          :closable="false"
+          style="margin: 12px 0"
+        >
+          <template #title>
+            這位使用者的 skill 需要已更新到支援伺服器查詢（v2.0 起的 run_query）；舊版 skill 切過去會拿不到查詢授權。
+          </template>
+        </el-alert>
+        <div style="margin-top: 12px">
+          <el-button
+            type="primary"
+            :loading="settingsDialog.saving"
+            :disabled="settingsDialog.queryExecution === settingsDialog.user?.query_execution"
+            @click="saveQueryExecution"
+          >
+            儲存
+          </el-button>
+        </div>
+      </el-tab-pane>
+
       <el-tab-pane label="重設 Key" name="resetKey">
         <p style="color: #666; margin-bottom: 16px; font-size: 14px">
           重設後使用者需重新至 Dashboard 領取新的 PBI_MASK_KEY。
@@ -281,7 +332,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import http from '@/api/http'
 import { formatDate, parseUtcDate } from '@/utils/date'
 
@@ -302,7 +353,9 @@ interface User {
   pbi_config_checks: ConfigCheck[]
   expires_at: string | null
   is_locked: boolean
+  query_execution: QueryExecution
 }
+type QueryExecution = 'edge' | 'server'
 interface Config { id: string; name: string }
 interface McpToken {
   id: string
@@ -324,6 +377,7 @@ const settingsDialog = ref({
   activateForm: { isActive: false, expiresAt: null as Date | null },
   credForm: { tenant_id: '', client_id: '', client_secret: '', client_secret_expires_at: null as Date | null },
   assignConfigIds: [] as string[],
+  queryExecution: 'edge' as QueryExecution,
   checks: [] as ConfigCheck[],
   checkingId: null as string | null, // 正在檢測的 pbi_config_id，全部檢測時為 'all'
   patTokens: [] as McpToken[],
@@ -442,6 +496,7 @@ function openSettings(row: User) {
       client_secret_expires_at: parseUtcDate(row.client_secret_expires_at),
     },
     assignConfigIds: [...(row.pbi_config_ids ?? [])],
+    queryExecution: row.query_execution,
     checks: row.pbi_config_checks ?? [],
     checkingId: null,
     patTokens: [],
@@ -537,6 +592,52 @@ async function saveAssign() {
   if (pending.length) await runChecks(pending, { auto: true })
 }
 
+// ── 查詢方式（腳本查詢 edge／伺服器查詢 server） ─────────────────────
+
+function queryExecutionLabel(mode: QueryExecution) {
+  return mode === 'server' ? '伺服器查詢' : '腳本查詢'
+}
+
+async function setQueryExecution(userIds: string[], mode: QueryExecution) {
+  const { data } = await http.post('/users/batch-query-execution', { user_ids: userIds, query_execution: mode })
+  ElMessage.success(data.message)
+  await load()
+}
+
+async function saveQueryExecution() {
+  const d = settingsDialog.value
+  if (!d.user) return
+  d.saving = true
+  try {
+    await setQueryExecution([d.user.id], d.queryExecution)
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.detail ?? '切換失敗')
+  } finally {
+    d.saving = false
+  }
+}
+
+async function batchSetQueryExecution(mode: QueryExecution) {
+  if (!selected.value.length) return
+  const warning = mode === 'server'
+    ? '這些使用者的 skill 需要已更新到支援伺服器查詢（v2.0 起的 run_query），舊版 skill 切過去會拿不到查詢授權。'
+    : '切換後這些使用者的 AI 會改用查詢腳本自行連 Power BI，沙盒需要放行網路。'
+  try {
+    await ElMessageBox.confirm(
+      `將 ${selected.value.length} 位使用者改為「${queryExecutionLabel(mode)}」？\n${warning}`,
+      '切換查詢方式',
+      { type: 'warning', confirmButtonText: '切換', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    await setQueryExecution(selected.value.map((u) => u.id), mode)
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.detail ?? '批次切換失敗')
+  }
+}
+
 async function resetMaskKey() {
   const user = settingsDialog.value.user
   if (!user) return
@@ -626,3 +727,24 @@ async function batchDelete() {
 
 onMounted(load)
 </script>
+
+<style scoped>
+.mode-options {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+.mode-options :deep(.el-radio) {
+  height: auto;
+  margin-right: 0;
+  padding: 10px 12px;
+  white-space: normal;
+}
+.mode-desc {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  color: #909399;
+}
+</style>

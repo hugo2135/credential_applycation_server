@@ -4,7 +4,7 @@ import os
 import json
 import secrets as _secrets
 from datetime import datetime
-from typing import Optional
+from typing import Any, Literal, Optional
 
 from fastapi import Query
 from fastapi.responses import Response
@@ -12,6 +12,7 @@ from fastapi.responses import Response
 from fastapi import APIRouter, Depends, HTTPException, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -25,6 +26,7 @@ from app.model_versions import (
 from app.models import AccessLog, Bookmark, PersonalAccessToken, User, PbiConfig, ModelChunk, UserPbiConfig
 from app.query_check import check_user_configs, link_check_dict, reset_checks
 from app.security import MAX_LOGIN_ATTEMPTS, encrypt_secret, issue_admin_jwt, verify_admin_jwt
+from app.system_settings import QUERY_EXECUTION_MODES, get_all_settings, update_settings
 from scripts.chunk_model import parse_model
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -92,6 +94,7 @@ def list_users(_=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
             "expires_at": u.expires_at,
             "created_at": u.created_at,
             "is_locked": u.failed_login_attempts >= MAX_LOGIN_ATTEMPTS,
+            "query_execution": u.query_execution,
         }
         for u in users
     ]
@@ -212,6 +215,27 @@ class BatchDeleteRequest(BaseModel):
     user_ids: list[str]
 
 
+class BatchQueryExecutionRequest(BaseModel):
+    user_ids: list[str]
+    query_execution: Literal["edge", "server"]
+
+
+@router.post("/users/batch-query-execution")
+def batch_set_query_execution(
+    body: BatchQueryExecutionRequest,
+    _=Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    """切換查詢方式（單一使用者也走這支，帶一個 id 即可）。設在使用者層級而不是
+    PBI 設定層級：先拿自己的帳號測 server 模式，再分批切換，出問題不會全部人一起查不了。"""
+    updated = db.query(User).filter(User.id.in_(body.user_ids)).update(
+        {"query_execution": body.query_execution}, synchronize_session=False
+    )
+    db.commit()
+    label = "伺服器查詢" if body.query_execution == "server" else "腳本查詢"
+    return {"message": f"已將 {updated} 位使用者切換為{label}"}
+
+
 @router.post("/users/batch-activate")
 def batch_activate_users(
     body: BatchActivateRequest,
@@ -306,6 +330,7 @@ def list_access_logs(
             "ip_address": r.ip_address,
             "detail": r.detail,
             "error": r.error,
+            "query_text": r.query_text,
             "created_at": r.created_at,
         }
         for r in rows
@@ -325,11 +350,11 @@ def export_access_logs(
 
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["created_at", "email", "auth_method", "method", "path", "ip_address", "detail", "error"])
+    writer.writerow(["created_at", "email", "auth_method", "method", "path", "ip_address", "detail", "error", "query_text"])
     for r in rows:
         writer.writerow([
             r.created_at.isoformat(), r.email or "", r.auth_method, r.method or "", r.path,
-            r.ip_address or "", r.detail or "", r.error or "",
+            r.ip_address or "", r.detail or "", r.error or "", r.query_text or "",
         ])
 
     filename = f"access-logs-{datetime.utcnow().strftime('%Y%m%d')}.csv"
@@ -405,6 +430,38 @@ def run_user_query_check(
 
 
 # ── PBI 設定管理 ───────────────────────────────────────────────────────────
+
+# ── 系統設定（/admin/settings） ────────────────────────────────────────────
+
+def _settings_response(db: Session) -> dict:
+    counts = dict(
+        db.query(User.query_execution, func.count(User.id)).group_by(User.query_execution).all()
+    )
+    return {
+        "values": get_all_settings(db),
+        "query_execution_counts": {mode: counts.get(mode, 0) for mode in QUERY_EXECUTION_MODES},
+    }
+
+
+@router.get("/settings")
+def get_system_settings(_=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
+    return _settings_response(db)
+
+
+@router.put("/settings")
+def update_system_settings(
+    body: dict[str, Any],
+    _=Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    """只更新有帶的 key；任一個不合法整批不寫入。"""
+    try:
+        update_settings(db, body)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    db.commit()
+    return {**_settings_response(db), "message": "設定已儲存，立即生效"}
+
 
 class FilterRule(BaseModel):
     description: str

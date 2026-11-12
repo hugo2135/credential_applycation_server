@@ -77,6 +77,7 @@ def redeem_ticket(
             ip_address=client_ip(request),
             detail=ticket.pbi_config_id,
             error=error,
+            query_text=ticket.query_text,
         )
 
     def fail(status_code: int, message: str) -> NoReturn:

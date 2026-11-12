@@ -68,6 +68,12 @@ const router = createRouter({
       component: () => import('@/views/AccessLogsView.vue'),
       meta: { layout: 'admin', requiresAuth: 'admin', title: 'PBI 管理後台 - 存取歷史' },
     },
+    {
+      path: '/admin/settings',
+      name: 'admin-settings',
+      component: () => import('@/views/SettingsView.vue'),
+      meta: { layout: 'admin', requiresAuth: 'admin', title: 'PBI 管理後台 - 系統設定' },
+    },
 
     // ── Fallback ──────────────────────────────────────────────
     { path: '/admin', redirect: '/admin/login' },

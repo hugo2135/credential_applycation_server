@@ -16,6 +16,20 @@ from app.model_versions import serving_chunk, serving_model_version
 from app.models import AccessTicket, ModelChunk, PbiConfig, PersonalAccessToken, User, UserPbiConfig
 from app.routers.ticket import EXPIRED_ACCOUNT_MESSAGE, ticket_ttl_seconds
 from app.security import generate_access_ticket, hash_opaque_token, verify_mcp_access_token
+from app.server_query import QueryLimits, QueryTarget, ServerQueryError, execute_dax
+from app.system_settings import get_setting
+
+# access log 的 query_text 上限：正常 DAX 遠小於此，只防止異常大的輸入灌進 DB
+_LOGGED_QUERY_MAX_CHARS = 20000
+
+_USE_RUN_QUERY_MESSAGE = (
+    "你的帳號已改由伺服器執行查詢，不再發放 ticket：請改用 run_query tool 直接帶 DAX 查詢"
+    "（get_model_detail 回傳的 query_execution 會告訴你該用哪一種）"
+)
+_USE_TICKET_MESSAGE = (
+    "你的帳號目前是由查詢腳本自行執行查詢，伺服器不代查：請改用 get_query_ticket"
+    "（get_model_detail 回傳的 query_execution 會告訴你該用哪一種）"
+)
 
 
 def _issuer() -> str:
@@ -108,7 +122,15 @@ def _current_user(db) -> User:
     return user
 
 
-def _log_tool_access(db, user: User, tool_name: str, detail: str | None = None) -> None:
+def _log_tool_access(
+    db,
+    user: User,
+    tool_name: str,
+    detail: str | None = None,
+    *,
+    error: str | None = None,
+    query_text: str | None = None,
+) -> None:
     # _JwtTokenVerifier 只在每個 HTTP request 驗證 token 時記一筆通用的 "/mcp"，
     # 不知道這個 request 實際觸發了哪個 tool（initialize/list_tools 這些協定層
     # 呼叫也會經過那裡）。這裡額外補一筆更精確的紀錄，path 帶上實際的 tool 名稱，
@@ -125,6 +147,8 @@ def _log_tool_access(db, user: User, tool_name: str, detail: str | None = None) 
         method=ctx["method"],
         ip_address=ctx["ip"],
         detail=detail,
+        error=error,
+        query_text=query_text,
     )
 
 
@@ -198,7 +222,11 @@ def get_mcp_server() -> FastMCP:
     allowed_hosts, allowed_origins = _allowed_hosts_and_origins()
     server = FastMCP(
         name="pbi-credential-mcp",
-        instructions="查詢使用者被授權存取的 Power BI 語意模型結構，並取得執行 DAX 查詢所需的 access token（實際查詢由呼叫端直接對 Power BI REST API 執行）。",
+        instructions=(
+            "查詢使用者被授權存取的 Power BI 語意模型結構並執行 DAX 查詢。查詢方式依使用者設定而定"
+            "（get_model_detail 的 query_execution）：edge 由呼叫端用 get_query_ticket 換 token 後直接打 "
+            "Power BI REST API，server 則呼叫 run_query 由伺服器代查並直接回傳結果。"
+        ),
         token_verifier=_JwtTokenVerifier(),
         auth=AuthSettings(
             issuer_url=issuer,
@@ -215,7 +243,8 @@ def get_mcp_server() -> FastMCP:
 
     @server.tool()
     async def list_models() -> list[dict]:
-        """列出目前使用者被授權存取的所有 PBI 語意模型（輕量版：id、名稱、說明、表數量，不含完整結構）。"""
+        """列出目前使用者被授權存取的所有 PBI 語意模型（輕量版：id、名稱、說明、表數量，不含完整結構）。
+        query_execution 是這位使用者的查詢方式（說明見 get_model_detail）。"""
         with SessionLocal() as db:
             user = _current_user(db)
             _log_tool_access(db, user, "list_models")
@@ -234,6 +263,7 @@ def get_mcp_server() -> FastMCP:
                     "model_version": chunk.model_version,
                     "model_description": chunk.model_description,
                     "table_count": len(chunk.tables) if chunk.tables else 0,
+                    "query_execution": user.query_execution,
                     "query_modes": [
                         {"mode_id": m.get("mode_id"), "name": m.get("name"), "description": m.get("description")}
                         for m in (config.query_modes or [])
@@ -247,7 +277,13 @@ def get_mcp_server() -> FastMCP:
         DAX 生成前查表格/欄位/量值/篩選規則/欄位別名用。mode_id 選填：list_models 回傳的
         query_modes 若有多個選項，先讓使用者選一個再帶進來，只回該模式範圍內的表，
         且該模式自己的篩選規則會疊加成一筆 alwaysApply 的 filter profile。不帶 mode_id
-        時行為跟以前完全一樣（全表、不含模式篩選）。"""
+        時行為跟以前完全一樣（全表、不含模式篩選）。
+
+        **query_execution 決定 DAX 生成後怎麼執行**（管理員依使用者設定）：
+        - "edge"：呼叫 get_query_ticket（帶上要執行的 dax），由查詢腳本兌換 token 後自己打 Power BI。
+        - "server"：直接呼叫 run_query(pbi_config_id, dax)，伺服器代查並回傳結果，
+          不需要查詢腳本、也不需要任何網路設定。
+        用錯的那一個會被拒絕並提示改用另一個。"""
         with SessionLocal() as db:
             user = _current_user(db)
             _log_tool_access(db, user, "get_model_detail", detail=pbi_config_id)
@@ -289,6 +325,7 @@ def get_mcp_server() -> FastMCP:
                 "workspace_id": config.workspace_id,
                 "dataset_id": config.dataset_id,
                 "query_mode_id": mode_id,
+                "query_execution": user.query_execution,
                 "filters": filters,
                 # v1.5 起每組都有欄位本身的 aliases，舊資料沒有這個 key，補成空陣列讓 skill 端不用判斷
                 "column_aliases": [{**g, "aliases": g.get("aliases") or []} for g in (config.column_aliases or [])],
@@ -297,8 +334,11 @@ def get_mcp_server() -> FastMCP:
             }
 
     @server.tool()
-    async def get_query_ticket(pbi_config_id: str) -> dict:
+    async def get_query_ticket(pbi_config_id: str, dax: str | None = None) -> dict:
         """取得執行 DAX 查詢用的一次性 ticket。
+
+        **請把這次要執行的完整 DAX 帶在 dax 參數**（要跑好幾段就全部串在一起），
+        會記進管理員的存取歷史作為查詢紀錄。不帶也能拿到 ticket。
 
         **這不是 access token，本身不能拿來呼叫 Power BI**，而且它是短效、單次使用的
         （見 expires_in，秒）。正確用法是把 ticket 原樣交給你的查詢腳本，由腳本自己
@@ -320,8 +360,11 @@ def get_mcp_server() -> FastMCP:
         """
         with SessionLocal() as db:
             user = _current_user(db)
-            _log_tool_access(db, user, "get_query_ticket", detail=pbi_config_id)
+            logged_query = dax.strip()[:_LOGGED_QUERY_MAX_CHARS] if dax and dax.strip() else None
+            _log_tool_access(db, user, "get_query_ticket", detail=pbi_config_id, query_text=logged_query)
             _check_access(user, pbi_config_id, db)
+            if user.query_execution == "server":
+                raise ToolError(_USE_RUN_QUERY_MESSAGE)
             # 先擋掉憑證沒設定的情況：不然使用者要等到腳本 redeem 時才會失敗，
             # 那時候的錯誤訊息離問題根源更遠、更難查。
             if not user.tenant_id or not user.client_id or not user.client_secret_enc:
@@ -334,6 +377,7 @@ def get_mcp_server() -> FastMCP:
                 user_id=user.id,
                 pbi_config_id=pbi_config_id,
                 expires_at=datetime.utcnow() + timedelta(seconds=ttl),
+                query_text=logged_query,
             ))
             db.commit()
 
@@ -344,11 +388,77 @@ def get_mcp_server() -> FastMCP:
         }
 
     @server.tool()
+    async def run_query(pbi_config_id: str, dax: str) -> dict:
+        """由伺服器代為執行 DAX 查詢並直接回傳結果（只適用 query_execution 為 "server" 的使用者）。
+
+        dax 是完整的 DAX 查詢（EVALUATE ...）。回傳 tables：每個 EVALUATE 一筆，含
+        columns、rows（每列一個 dict，key 是 "Table[Column]" 或量值名稱）、row_count
+        （Power BI 實際回傳的列數）與 truncated。
+
+        **truncated 為 true 代表結果超過伺服器的列數上限（max_rows），只回傳了前面幾列**：
+        請告知使用者結果不完整，並改寫成彙總、加篩選或 TOPN 後再查，不要拿不完整的資料
+        做加總或排名結論。
+
+        查詢失敗時錯誤訊息會說明原因：「DAX 執行錯誤」代表 DAX 本身有問題，請依訊息修正
+        後重試；Azure AD／權限相關錯誤則不是 DAX 能解決的，請告知使用者聯絡管理員。
+        """
+        with SessionLocal() as db:
+            user = _current_user(db)
+            user_id = user.id
+            config = _check_access(user, pbi_config_id, db)
+            logged_query = dax[:_LOGGED_QUERY_MAX_CHARS]
+
+            def reject(message: str):
+                _log_tool_access(db, user, "run_query", pbi_config_id, error=message, query_text=logged_query)
+                raise ToolError(message)
+
+            if user.query_execution != "server":
+                reject(_USE_TICKET_MESSAGE)
+            if not user.tenant_id or not user.client_id or not user.client_secret_enc:
+                reject("Azure AD 憑證尚未設定，請聯絡管理員")
+            if not config.workspace_id or not config.dataset_id:
+                reject("PBI 設定缺少 Workspace ID 或 Dataset ID，請聯絡管理員")
+            if not dax.strip():
+                reject("dax 不可為空白")
+
+            target = QueryTarget(
+                tenant_id=user.tenant_id,
+                client_id=user.client_id,
+                client_secret_enc=user.client_secret_enc,
+                workspace_id=config.workspace_id,
+                dataset_id=config.dataset_id,
+            )
+            limits = QueryLimits(
+                max_concurrency=get_setting(db, "server_query_max_concurrency"),
+                max_rows=get_setting(db, "server_query_max_rows"),
+                timeout_seconds=get_setting(db, "server_query_timeout_seconds"),
+            )
+
+        def log(error: str | None = None) -> None:
+            with SessionLocal() as db:
+                user = db.get(User, user_id)
+                if user:
+                    _log_tool_access(db, user, "run_query", pbi_config_id, error=error, query_text=logged_query)
+
+        # 查詢可能要等上幾十秒（含排隊），這段期間不握著 DB session
+        try:
+            result = await execute_dax(target, dax, limits)
+        except ServerQueryError as e:
+            log(str(e))
+            raise ToolError(str(e)) from None
+        except Exception as e:
+            log(f"查詢時發生未預期錯誤：{type(e).__name__}")
+            raise
+        log()
+        return result
+
+    @server.tool()
     async def list_bookmarks(pbi_config_id: str | None = None) -> list[dict]:
         """列出使用者存過的書籤（常用查詢），可用 pbi_config_id 只看某個模型的。
 
         每筆含 title、dax、question（存檔時的原始自然語言問題）。執行書籤時跟一般查詢
-        一樣：先呼叫 get_query_ticket，再把書籤的 dax 交給查詢腳本。
+        一樣依 query_execution 決定：edge 先呼叫 get_query_ticket 再把書籤的 dax 交給
+        查詢腳本，server 直接把 dax 交給 run_query。
 
         **possibly_outdated 為 true 時**，代表存檔後語意模型升過版（model_version !=
         current_model_version），DAX 引用的表/欄位可能已改名或刪除。這時請先告知使用者，

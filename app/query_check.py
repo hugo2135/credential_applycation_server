@@ -4,10 +4,9 @@
 `EVALUATE ROW("ok", 1)` 不讀任何真實資料，但跑得過就代表整條路徑都通：Azure AD
 憑證正確、SP 已被加入 workspace、Power BI 租用戶設定允許 SP 使用 API、dataset 存在。
 
-這是 server 少數會自己打 Power BI 的地方，但不違反「server 不代理查詢」的原則——
-那條規則是怕 MCP tool 裡的同步網路呼叫卡住 event loop、並發時拖垮服務。這裡只由
-管理員手動觸發、頻率極低，而且跑在一般 FastAPI 同步端點上（本來就在 thread pool），
-情況跟 ticket redeem 一樣。
+這裡用同步的 httpx.post 沒問題：只由管理員手動觸發、頻率極低，而且跑在一般 FastAPI
+同步端點上（本來就在 thread pool），情況跟 ticket redeem 一樣。MCP tool 裡的伺服器查詢
+（app/server_query.py）才必須全程 async，否則並發時會卡住 event loop。
 
 失敗訊息刻意分兩段：第一行是白話原因（給管理員判斷該去哪裡修），後面附原始錯誤
 （可以直接貼給管理 Azure／Power BI 的人）。實務上最花時間的就是「錯誤訊息看不出原因」。
@@ -44,6 +43,14 @@ _POWERBI_HINTS = {
 }
 
 
+def explain_aad_error(detail: str) -> str:
+    """把 acquire_powerbi_token 丟出的錯誤翻成白話原因（server 查詢也共用）。"""
+    for code, hint in _AAD_HINTS:
+        if code in detail:
+            return hint
+    return "向 Azure AD 換發 token 失敗"
+
+
 def _failed(hint: str, raw: str | None = None) -> tuple[str, str]:
     return "failed", f"{hint}\n原始錯誤：{raw}" if raw else hint
 
@@ -59,10 +66,7 @@ def run_query_check(user: User, config: PbiConfig) -> tuple[str, str]:
         access_token = acquire_powerbi_token(user)["access_token"]
     except HTTPException as e:
         detail = str(e.detail)
-        for code, hint in _AAD_HINTS:
-            if code in detail:
-                return _failed(hint, detail)
-        return _failed("向 Azure AD 換發 token 失敗", detail)
+        return _failed(explain_aad_error(detail), detail)
     except Exception as e:  # 例如 SERVER_JWT_SECRET 換過導致 secret 解密失敗、或連不到 Azure
         return _failed("向 Azure AD 換發 token 時發生錯誤", f"{type(e).__name__}: {e}")
 

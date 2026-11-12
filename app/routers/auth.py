@@ -17,6 +17,7 @@ from app.security import (
     generate_personal_access_token, hash_opaque_token,
     issue_user_jwt, verify_user_jwt,
 )
+from app.system_settings import get_setting
 
 
 def _check_email_domain(email: str):
@@ -87,7 +88,11 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
     _check_email_domain(body.email)
     if db.query(User).filter(User.email == body.email).first():
         raise HTTPException(status_code=409, detail="Email 已被使用")
-    user = User(email=body.email, password_hash=hash_password(body.password))
+    user = User(
+        email=body.email,
+        password_hash=hash_password(body.password),
+        query_execution=get_setting(db, "default_query_execution"),
+    )
     db.add(user)
     db.commit()
     db.refresh(user)
