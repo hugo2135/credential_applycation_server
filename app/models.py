@@ -193,9 +193,11 @@ class AccessLog(Base):
     # null 代表成功。目前只有 ticket redeem 會記失敗：ticket 拿得到卻沒換到 token 時，
     # 這是 server 端唯一能分辨「兌換失敗」跟「請求根本沒送到」的線索。
     error = Column(Text, nullable=True)
-    # server 查詢模式（run_query）實際執行的 DAX。edge 模式查詢在 client 端執行，
-    # server 看不到內容，只有 server 模式能留下「誰查了什麼」
+    # run_query 實際執行的 DAX；get_query_ticket／ticket 兌換則是 skill 領 ticket 時自行申報的
     query_text = Column(Text, nullable=True)
+    # 收到請求到回傳的毫秒數。只有 MCP tool 與 ticket 兌換有記；其他紀錄是在身份驗證
+    # 那一刻寫的，那時請求還沒處理，量不到。
+    duration_ms = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 

@@ -97,6 +97,11 @@ async def test_server_user_runs_query_and_ticket_is_refused(
     ticket = await _call(live_server, access_token, "get_query_ticket", {"pbi_config_id": config_id})
     assert ticket.isError
     assert "run_query" in ticket.content[0].text
+    # 被拒絕的呼叫在存取歷史裡要標成失敗，不能看起來跟成功一樣
+    email = next(u["email"] for u in users if u["id"] == user_id)
+    logs = client.get("/api/admin/access-logs", headers=_headers(admin_token), params={"email": email}).json()
+    ticket_log = next(l for l in logs if l["path"] == "/mcp/get_query_ticket")
+    assert "run_query" in ticket_log["error"]
 
     original = client.get("/api/admin/settings", headers=_headers(admin_token)).json()["values"]
     assert _put_settings(client, admin_token, {"server_query_max_rows": 2}).status_code == 200
@@ -120,6 +125,7 @@ async def test_server_user_runs_query_and_ticket_is_refused(
     logs = _run_query_logs(client, admin_token, user_id)
     assert logs[0]["error"] is None
     assert logs[0]["query_text"] == "EVALUATE T"
+    assert logs[0]["duration_ms"] is not None and logs[0]["duration_ms"] >= 0
     assert logs[0]["detail"] == config_id
 
 

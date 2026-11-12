@@ -331,6 +331,7 @@ def list_access_logs(
             "detail": r.detail,
             "error": r.error,
             "query_text": r.query_text,
+            "duration_ms": r.duration_ms,
             "created_at": r.created_at,
         }
         for r in rows
@@ -350,11 +351,12 @@ def export_access_logs(
 
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["created_at", "email", "auth_method", "method", "path", "ip_address", "detail", "error", "query_text"])
+    writer.writerow(["created_at", "email", "auth_method", "method", "path", "ip_address", "detail", "error", "query_text", "duration_ms"])
     for r in rows:
         writer.writerow([
             r.created_at.isoformat(), r.email or "", r.auth_method, r.method or "", r.path,
             r.ip_address or "", r.detail or "", r.error or "", r.query_text or "",
+            "" if r.duration_ms is None else r.duration_ms,
         ])
 
     filename = f"access-logs-{datetime.utcnow().strftime('%Y%m%d')}.csv"

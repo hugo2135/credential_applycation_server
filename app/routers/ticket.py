@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import datetime
 from typing import NoReturn
 
@@ -6,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.access_log import client_ip, record_access
+from app.access_log import client_ip, elapsed_ms, record_access
 from app.database import get_db
 from app.models import AccessTicket, PbiConfig, User
 from app.routers.credential import acquire_powerbi_token
@@ -58,6 +59,7 @@ def redeem_ticket(
     ticket：那種請求連是誰都不知道，而這支端點不需要登入，記下來等於讓任何人都能
     往 DB 灌資料。
     """
+    started = time.monotonic()
     ticket = db.query(AccessTicket).filter(
         AccessTicket.token_hash == hash_opaque_token(body.ticket)
     ).first()
@@ -78,6 +80,7 @@ def redeem_ticket(
             detail=ticket.pbi_config_id,
             error=error,
             query_text=ticket.query_text,
+            duration_ms=elapsed_ms(started),
         )
 
     def fail(status_code: int, message: str) -> NoReturn:

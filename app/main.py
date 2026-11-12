@@ -78,6 +78,7 @@ with engine.connect() as _conn:
         "ALTER TABLE users ADD COLUMN query_execution TEXT NOT NULL DEFAULT 'edge'",
         "ALTER TABLE access_logs ADD COLUMN query_text TEXT",
         "ALTER TABLE access_tickets ADD COLUMN query_text TEXT",
+        "ALTER TABLE access_logs ADD COLUMN duration_ms INTEGER",
     ]:
         try:
             _conn.execute(text(_stmt))
@@ -148,7 +149,7 @@ async def lifespan(_: FastAPI):
 
 
 # 這個版號要跟 git tag 一致，改版時兩邊一起改（見 CLAUDE.md「版本管理」）。
-app = FastAPI(title="PBI Credential 申請程式", version="2.0", lifespan=lifespan)
+app = FastAPI(title="PBI Credential 申請程式", version="2.1", lifespan=lifespan)
 
 
 # OAuth/MCP 這幾條路徑本來就要給不特定第三方（使用者的瀏覽器、Claude 的伺服器）連，

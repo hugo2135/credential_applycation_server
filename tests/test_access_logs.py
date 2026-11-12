@@ -127,7 +127,7 @@ def test_access_logs_export_csv(client, admin_token, active_user):
     assert res.headers["content-type"].startswith("text/csv")
 
     rows = list(csv.reader(io.StringIO(res.text)))
-    assert rows[0] == ["created_at", "email", "auth_method", "method", "path", "ip_address", "detail", "error", "query_text"]
+    assert rows[0] == ["created_at", "email", "auth_method", "method", "path", "ip_address", "detail", "error", "query_text", "duration_ms"]
     assert any(row[1] == email for row in rows[1:])
 
 

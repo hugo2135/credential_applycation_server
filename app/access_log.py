@@ -1,4 +1,5 @@
 import contextvars
+import time
 
 from fastapi import Request
 from sqlalchemy.orm import Session
@@ -44,6 +45,7 @@ def record_access(
     detail: str | None = None,
     error: str | None = None,
     query_text: str | None = None,
+    duration_ms: int | None = None,
 ) -> None:
     db.add(AccessLog(
         user_id=user_id,
@@ -55,5 +57,11 @@ def record_access(
         detail=detail,
         error=error,
         query_text=query_text,
+        duration_ms=duration_ms,
     ))
     db.commit()
+
+
+def elapsed_ms(started: float) -> int:
+    """`started` 是 `time.monotonic()` 的值（不用 wall clock，避免系統校時造成負數）。"""
+    return round((time.monotonic() - started) * 1000)

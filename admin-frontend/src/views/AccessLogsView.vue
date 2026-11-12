@@ -55,6 +55,10 @@
           <el-tag v-else size="small" type="success">成功</el-tag>
         </template>
       </el-table-column>
+      <!-- 只有 MCP tool 與 ticket 兌換量得到耗時，其他紀錄寫在身份驗證當下 -->
+      <el-table-column label="耗時" width="90" align="right">
+        <template #default="{ row }">{{ formatDuration(row.duration_ms) }}</template>
+      </el-table-column>
       <el-table-column label="對象 PBI 設定" min-width="140">
         <template #default="{ row }">{{ row.detail ? configName(row.detail) : '—' }}</template>
       </el-table-column>
@@ -88,7 +92,13 @@ interface AccessLog {
   detail: string | null
   error: string | null
   query_text: string | null
+  duration_ms: number | null
   created_at: string
+}
+
+function formatDuration(ms: number | null) {
+  if (ms == null) return '—'
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} 秒`
 }
 
 const logs = ref<AccessLog[]>([])

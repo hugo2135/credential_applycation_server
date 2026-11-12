@@ -1,4 +1,6 @@
 import os
+import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from functools import lru_cache
 
@@ -10,7 +12,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
 from app import bookmarks as bookmark_store
-from app.access_log import get_mcp_request_context, record_access
+from app.access_log import elapsed_ms, get_mcp_request_context, record_access
 from app.database import SessionLocal
 from app.model_versions import serving_chunk, serving_model_version
 from app.models import AccessTicket, ModelChunk, PbiConfig, PersonalAccessToken, User, UserPbiConfig
@@ -130,6 +132,7 @@ def _log_tool_access(
     *,
     error: str | None = None,
     query_text: str | None = None,
+    duration_ms: int | None = None,
 ) -> None:
     # _JwtTokenVerifier 只在每個 HTTP request 驗證 token 時記一筆通用的 "/mcp"，
     # 不知道這個 request 實際觸發了哪個 tool（initialize/list_tools 這些協定層
@@ -149,7 +152,32 @@ def _log_tool_access(
         detail=detail,
         error=error,
         query_text=query_text,
+        duration_ms=duration_ms,
     )
+
+
+@contextmanager
+def _logged_tool_call(db, user: User, tool_name: str, detail: str | None = None, *, query_text: str | None = None):
+    """包住 tool 本體，執行完才依結果記一筆：被拒絕（ToolError）時 error 放拒絕原因。
+
+    早期是一進 tool 就先記，被拒絕的呼叫（沒權限、server 模式的使用者領 ticket 等）
+    在存取歷史裡看起來跟成功一模一樣，管理員無從分辨。順便記下本體花了多久。"""
+    started = time.monotonic()
+
+    def log(error: str | None = None) -> None:
+        _log_tool_access(db, user, tool_name, detail, error=error, query_text=query_text,
+                         duration_ms=elapsed_ms(started))
+
+    try:
+        yield
+    except ToolError as e:
+        log(str(e))
+        raise
+    except Exception as e:
+        db.rollback()
+        log(f"未預期錯誤：{type(e).__name__}")
+        raise
+    log()
 
 
 class _ModelChunkMissing(Exception):
@@ -247,28 +275,28 @@ def get_mcp_server() -> FastMCP:
         query_execution 是這位使用者的查詢方式（說明見 get_model_detail）。"""
         with SessionLocal() as db:
             user = _current_user(db)
-            _log_tool_access(db, user, "list_models")
-            links = db.query(UserPbiConfig).filter(UserPbiConfig.user_id == user.id).all()
-            result = []
-            for link in links:
-                config = db.query(PbiConfig).filter(PbiConfig.id == link.pbi_config_id).first()
-                if not config:
-                    continue
-                chunk = serving_chunk(db, link.pbi_config_id)
-                if not chunk:
-                    continue
-                result.append({
-                    "pbi_config_id": config.id,
-                    "pbi_config_name": config.name,
-                    "model_version": chunk.model_version,
-                    "model_description": chunk.model_description,
-                    "table_count": len(chunk.tables) if chunk.tables else 0,
-                    "query_execution": user.query_execution,
-                    "query_modes": [
-                        {"mode_id": m.get("mode_id"), "name": m.get("name"), "description": m.get("description")}
-                        for m in (config.query_modes or [])
-                    ],
-                })
+            with _logged_tool_call(db, user, "list_models"):
+                links = db.query(UserPbiConfig).filter(UserPbiConfig.user_id == user.id).all()
+                result = []
+                for link in links:
+                    config = db.query(PbiConfig).filter(PbiConfig.id == link.pbi_config_id).first()
+                    if not config:
+                        continue
+                    chunk = serving_chunk(db, link.pbi_config_id)
+                    if not chunk:
+                        continue
+                    result.append({
+                        "pbi_config_id": config.id,
+                        "pbi_config_name": config.name,
+                        "model_version": chunk.model_version,
+                        "model_description": chunk.model_description,
+                        "table_count": len(chunk.tables) if chunk.tables else 0,
+                        "query_execution": user.query_execution,
+                        "query_modes": [
+                            {"mode_id": m.get("mode_id"), "name": m.get("name"), "description": m.get("description")}
+                            for m in (config.query_modes or [])
+                        ],
+                    })
             return result
 
     @server.tool()
@@ -286,52 +314,53 @@ def get_mcp_server() -> FastMCP:
         用錯的那一個會被拒絕並提示改用另一個。"""
         with SessionLocal() as db:
             user = _current_user(db)
-            _log_tool_access(db, user, "get_model_detail", detail=pbi_config_id)
-            config = _check_access(user, pbi_config_id, db)
-            # serving_model_version 只撈版本號欄位，不整列 select——整列會連 relationships/tables
-            # 兩個大 JSON 欄位一起讀出來並解析，那正是下面要靠快取避開的成本。
-            model_version = serving_model_version(db, pbi_config_id)
-            if model_version is None:
-                raise ToolError("此 PBI 設定尚未上傳任何語意模型")
+            with _logged_tool_call(db, user, "get_model_detail", detail=pbi_config_id):
+                config = _check_access(user, pbi_config_id, db)
+                # serving_model_version 只撈版本號欄位，不整列 select——整列會連 relationships/tables
+                # 兩個大 JSON 欄位一起讀出來並解析，那正是下面要靠快取避開的成本。
+                model_version = serving_model_version(db, pbi_config_id)
+                if model_version is None:
+                    raise ToolError("此 PBI 設定尚未上傳任何語意模型")
 
-            try:
-                relationships, tables = _load_model_chunk(pbi_config_id, model_version)
-            except _ModelChunkMissing:
-                raise ToolError("此 PBI 設定尚未上傳任何語意模型")
+                try:
+                    relationships, tables = _load_model_chunk(pbi_config_id, model_version)
+                except _ModelChunkMissing:
+                    raise ToolError("此 PBI 設定尚未上傳任何語意模型")
 
-            filters = list(config.filters or [])
-            if mode_id:
-                mode = next((m for m in (config.query_modes or []) if m.get("mode_id") == mode_id), None)
-                if not mode:
-                    raise ToolError(f"找不到查詢模式：{mode_id}")
-                mode_tables = mode.get("tables") or []
-                if mode_tables:
-                    tables = [t for t in tables if t.get("table") in mode_tables]
-                if mode.get("filters"):
-                    filters.append({
-                        "filterId": f"mode:{mode_id}",
-                        "name": mode.get("name", mode_id),
-                        "description": mode.get("description"),
-                        "alwaysApply": True,
-                        "overrideDefaults": False,
-                        "contextKeywords": [],
-                        "filters": mode["filters"],
-                    })
+                filters = list(config.filters or [])
+                if mode_id:
+                    mode = next((m for m in (config.query_modes or []) if m.get("mode_id") == mode_id), None)
+                    if not mode:
+                        raise ToolError(f"找不到查詢模式：{mode_id}")
+                    mode_tables = mode.get("tables") or []
+                    if mode_tables:
+                        tables = [t for t in tables if t.get("table") in mode_tables]
+                    if mode.get("filters"):
+                        filters.append({
+                            "filterId": f"mode:{mode_id}",
+                            "name": mode.get("name", mode_id),
+                            "description": mode.get("description"),
+                            "alwaysApply": True,
+                            "overrideDefaults": False,
+                            "contextKeywords": [],
+                            "filters": mode["filters"],
+                        })
 
-            return {
-                "pbi_config_id": config.id,
-                "pbi_config_name": config.name,
-                "model_version": model_version,
-                "workspace_id": config.workspace_id,
-                "dataset_id": config.dataset_id,
-                "query_mode_id": mode_id,
-                "query_execution": user.query_execution,
-                "filters": filters,
-                # v1.5 起每組都有欄位本身的 aliases，舊資料沒有這個 key，補成空陣列讓 skill 端不用判斷
-                "column_aliases": [{**g, "aliases": g.get("aliases") or []} for g in (config.column_aliases or [])],
-                "relationships": relationships,
-                "tables": tables,
-            }
+                result = {
+                    "pbi_config_id": config.id,
+                    "pbi_config_name": config.name,
+                    "model_version": model_version,
+                    "workspace_id": config.workspace_id,
+                    "dataset_id": config.dataset_id,
+                    "query_mode_id": mode_id,
+                    "query_execution": user.query_execution,
+                    "filters": filters,
+                    # v1.5 起每組都有欄位本身的 aliases，舊資料沒有這個 key，補成空陣列讓 skill 端不用判斷
+                    "column_aliases": [{**g, "aliases": g.get("aliases") or []} for g in (config.column_aliases or [])],
+                    "relationships": relationships,
+                    "tables": tables,
+                }
+            return result
 
     @server.tool()
     async def get_query_ticket(pbi_config_id: str, dax: str | None = None) -> dict:
@@ -361,25 +390,25 @@ def get_mcp_server() -> FastMCP:
         with SessionLocal() as db:
             user = _current_user(db)
             logged_query = dax.strip()[:_LOGGED_QUERY_MAX_CHARS] if dax and dax.strip() else None
-            _log_tool_access(db, user, "get_query_ticket", detail=pbi_config_id, query_text=logged_query)
-            _check_access(user, pbi_config_id, db)
-            if user.query_execution == "server":
-                raise ToolError(_USE_RUN_QUERY_MESSAGE)
-            # 先擋掉憑證沒設定的情況：不然使用者要等到腳本 redeem 時才會失敗，
-            # 那時候的錯誤訊息離問題根源更遠、更難查。
-            if not user.tenant_id or not user.client_id or not user.client_secret_enc:
-                raise ToolError("Azure AD 憑證尚未設定，請聯絡管理員")
+            with _logged_tool_call(db, user, "get_query_ticket", detail=pbi_config_id, query_text=logged_query):
+                _check_access(user, pbi_config_id, db)
+                if user.query_execution == "server":
+                    raise ToolError(_USE_RUN_QUERY_MESSAGE)
+                # 先擋掉憑證沒設定的情況：不然使用者要等到腳本 redeem 時才會失敗，
+                # 那時候的錯誤訊息離問題根源更遠、更難查。
+                if not user.tenant_id or not user.client_id or not user.client_secret_enc:
+                    raise ToolError("Azure AD 憑證尚未設定，請聯絡管理員")
 
-            ttl = ticket_ttl_seconds()
-            raw_ticket = generate_access_ticket()
-            db.add(AccessTicket(
-                token_hash=hash_opaque_token(raw_ticket),
-                user_id=user.id,
-                pbi_config_id=pbi_config_id,
-                expires_at=datetime.utcnow() + timedelta(seconds=ttl),
-                query_text=logged_query,
-            ))
-            db.commit()
+                ttl = ticket_ttl_seconds()
+                raw_ticket = generate_access_ticket()
+                db.add(AccessTicket(
+                    token_hash=hash_opaque_token(raw_ticket),
+                    user_id=user.id,
+                    pbi_config_id=pbi_config_id,
+                    expires_at=datetime.utcnow() + timedelta(seconds=ttl),
+                    query_text=logged_query,
+                ))
+                db.commit()
 
         return {
             "ticket": raw_ticket,
@@ -402,15 +431,21 @@ def get_mcp_server() -> FastMCP:
         查詢失敗時錯誤訊息會說明原因：「DAX 執行錯誤」代表 DAX 本身有問題，請依訊息修正
         後重試；Azure AD／權限相關錯誤則不是 DAX 能解決的，請告知使用者聯絡管理員。
         """
+        started = time.monotonic()
         with SessionLocal() as db:
             user = _current_user(db)
             user_id = user.id
-            config = _check_access(user, pbi_config_id, db)
             logged_query = dax[:_LOGGED_QUERY_MAX_CHARS]
 
             def reject(message: str):
-                _log_tool_access(db, user, "run_query", pbi_config_id, error=message, query_text=logged_query)
+                _log_tool_access(db, user, "run_query", pbi_config_id, error=message, query_text=logged_query,
+                                 duration_ms=elapsed_ms(started))
                 raise ToolError(message)
+
+            try:
+                config = _check_access(user, pbi_config_id, db)
+            except ToolError as e:
+                reject(str(e))
 
             if user.query_execution != "server":
                 reject(_USE_TICKET_MESSAGE)
@@ -438,7 +473,8 @@ def get_mcp_server() -> FastMCP:
             with SessionLocal() as db:
                 user = db.get(User, user_id)
                 if user:
-                    _log_tool_access(db, user, "run_query", pbi_config_id, error=error, query_text=logged_query)
+                    _log_tool_access(db, user, "run_query", pbi_config_id, error=error, query_text=logged_query,
+                                     duration_ms=elapsed_ms(started))
 
         # 查詢可能要等上幾十秒（含排隊），這段期間不握著 DB session
         try:
@@ -466,11 +502,12 @@ def get_mcp_server() -> FastMCP:
         """
         with SessionLocal() as db:
             user = _current_user(db)
-            _log_tool_access(db, user, "list_bookmarks", detail=pbi_config_id)
-            try:
-                return bookmark_store.list_bookmarks(db, user.id, pbi_config_id)
-            except bookmark_store.BookmarkError as e:
-                raise ToolError(str(e))
+            with _logged_tool_call(db, user, "list_bookmarks", detail=pbi_config_id):
+                try:
+                    result = bookmark_store.list_bookmarks(db, user.id, pbi_config_id)
+                except bookmark_store.BookmarkError as e:
+                    raise ToolError(str(e))
+            return result
 
     @server.tool()
     async def save_bookmark(
@@ -491,18 +528,18 @@ def get_mcp_server() -> FastMCP:
         """
         with SessionLocal() as db:
             user = _current_user(db)
-            _log_tool_access(db, user, "save_bookmark", detail=pbi_config_id)
-            try:
-                status, bookmark = bookmark_store.save_bookmark(
-                    db, user.id, pbi_config_id, title, dax, question, overwrite,
+            with _logged_tool_call(db, user, "save_bookmark", detail=pbi_config_id):
+                try:
+                    status, bookmark = bookmark_store.save_bookmark(
+                        db, user.id, pbi_config_id, title, dax, question, overwrite,
+                    )
+                except bookmark_store.BookmarkError as e:
+                    raise ToolError(str(e))
+                config = db.query(PbiConfig).filter(PbiConfig.id == pbi_config_id).first()
+                item = bookmark_store.bookmark_dict(
+                    bookmark, config.name if config else None,
+                    serving_model_version(db, pbi_config_id),
                 )
-            except bookmark_store.BookmarkError as e:
-                raise ToolError(str(e))
-            config = db.query(PbiConfig).filter(PbiConfig.id == pbi_config_id).first()
-            item = bookmark_store.bookmark_dict(
-                bookmark, config.name if config else None,
-                serving_model_version(db, pbi_config_id),
-            )
             if status == "conflict":
                 return {
                     "saved": False,
@@ -517,9 +554,9 @@ def get_mcp_server() -> FastMCP:
         """刪除一個書籤（bookmark_id 從 list_bookmarks 取得）。刪除前請先跟使用者確認。"""
         with SessionLocal() as db:
             user = _current_user(db)
-            _log_tool_access(db, user, "delete_bookmark", detail=bookmark_id)
-            if not bookmark_store.delete_bookmark(db, user.id, bookmark_id):
-                raise ToolError("找不到這個書籤")
+            with _logged_tool_call(db, user, "delete_bookmark", detail=bookmark_id):
+                if not bookmark_store.delete_bookmark(db, user.id, bookmark_id):
+                    raise ToolError("找不到這個書籤")
             return {"deleted": True}
 
     _mcp_server = server
