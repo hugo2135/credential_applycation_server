@@ -175,6 +175,22 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
 
 `server` 模式的好處：client 端不需要 code execution（Gemini、手機 app 等沒有沙盒的 client 也能查），也不用把 `<SITE_DOMAIN>`／`api.powerbi.com` 加進沙盒的 network egress 白名單——那是 edge 模式最常出問題的地方（見文末疑難排解）。代價是查詢結果會整包進入對話上下文，所以有列數上限（見下方 `truncated`）。
 
+#### 查詢紀錄（誰、什麼時候、查了什麼 DAX）
+
+兩種模式都會在管理員的存取歷史（`/admin/access-logs`）留下查詢紀錄，但可信度不同：
+
+| | `server` | `edge` |
+|---|---|---|
+| 紀錄路徑 | `/mcp/run_query` | `/mcp/get_query_ticket`（領 ticket）＋ `/api/ticket/redeem`（腳本兌換） |
+| DAX 從哪來 | 伺服器實際送去 Power BI 執行的那段 | skill 領 ticket 時帶的 `dax` 參數（自行申報） |
+| 可信度 | **就是實際執行的內容**，無法漏記或造假 | 只是申報：token 換出去之後實際查了什麼、查了幾次，伺服器看不到 |
+| 沒帶 DAX 時 | 不可能（`dax` 必填） | 紀錄裡沒有 DAX，其他欄位照記 |
+| 失敗也記嗎 | 會（DAX 錯誤、逾時、權限、模式不符） | 領取與兌換失敗都會記 |
+
+每筆紀錄都有：查詢人 email、時間、模型（`pbi_config_id`）、DAX 全文（超過 2 萬字截斷）、結果（空白＝成功，否則是失敗原因）。紀錄保留 90 天，可匯出 CSV。
+
+需要**可稽核**的查詢紀錄（例如要回答「誰在什麼時候查了哪些資料」），請讓管理員把那些使用者切到 `server`；`edge` 的紀錄只能當參考，完整稽核要再對 Power BI 自己的 activity log。對 skill 來說，`edge` 模式唯一要做的就是**呼叫 `get_query_ticket` 時一律帶上 `dax`**。
+
 ### `run_query`（v2.0 新增，僅 `query_execution = "server"`）
 
 由伺服器代為執行 DAX 並回傳結果。
@@ -211,7 +227,7 @@ Server 端固定回傳 JSON（透過 MCP 的 content/structuredContent 傳遞）
 | `Azure AD 驗證失敗…`、權限／找不到 workspace 相關 | 帳號或設定問題，不是 DAX 能解決的 | 告知使用者聯絡管理員，不要重試 |
 | `你的帳號目前是由查詢腳本自行執行查詢…` | 這位使用者是 `edge` | 改用 `get_query_ticket` |
 
-伺服器查詢會把實際執行的 DAX 記進管理員的存取歷史（`/mcp/run_query`）。edge 模式只能記下 skill 領 ticket 時自行申報的 DAX（見 `get_query_ticket` 的 `dax` 參數），伺服器無法驗證 token 換出去之後實際查了什麼，所以可信的稽核紀錄只有 server 模式。
+每次呼叫（成功或失敗）都會把實際執行的 DAX 記進管理員的存取歷史（`/mcp/run_query`），見上方「查詢紀錄」。
 
 ### `get_query_ticket`
 
