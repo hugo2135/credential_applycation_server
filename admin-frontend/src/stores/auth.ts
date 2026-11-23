@@ -23,6 +23,12 @@ export const useAuthStore = defineStore('auth', () => {
     setToken(res.data.access_token)
   }
 
+  // 管理員帳號（一般使用者帳號 + 管理員權限）
+  async function loginWithPassword(email: string, password: string) {
+    const res = await axios.post('/api/admin/login/password', { email, password })
+    setToken(res.data.access_token)
+  }
+
   // Google 登入由後端導回時直接帶著 token
   function setToken(newToken: string) {
     token.value = newToken
@@ -34,5 +40,5 @@ export const useAuthStore = defineStore('auth', () => {
     sessionStorage.removeItem('admin_token')
   }
 
-  return { token, isAuthenticated, login, setToken, logout }
+  return { token, isAuthenticated, login, loginWithPassword, setToken, logout }
 })

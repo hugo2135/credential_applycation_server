@@ -23,7 +23,7 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 
 | 對象 | 方式 |
 |------|------|
-| 管理員 SPA | POST /api/admin/login（ADMIN_SECRET） → 1 hr HS256 JWT，Bearer。或 Google 登入（email 在 `google_admin_emails` 內）；ADMIN_SECRET 永遠可用，是新部署／Google 設定壞掉時的備援 |
+| 管理員 SPA | 管理員帳號 = 一般使用者帳號 + `User.is_admin`（在 `/admin/users` 授予，須為開通狀態），用 `POST /api/admin/login/password`（帳密，共用 `authenticate_user` 的鎖定規則）或 Google 登入（不會建帳號）→ 1 hr HS256 JWT，帶 `sub`/`email`。`POST /api/admin/login`（ADMIN_SECRET）永遠保留，JWT 不帶身分，是新部署（第一位管理員靠它登入後自己勾選）／Google 設定壞掉時的備援。管理員不能拿掉自己的權限 |
 | 使用者 SPA | POST /auth/login（帳密） → user session JWT，Bearer。或 Google 登入 |
 | MCP connector | OAuth 2.1 + PKCE（`/oauth/authorize` 沿用使用者帳密登入，或用 Google 登入）→ 1 hr access JWT + 90 天 refresh token（每次使用輪換，只存 hash） |
 | MCP connector（支援 OAuth 但不做 DCR，要手動填用戶端 ID，如 Gemini 網頁版） | 使用者在 `/mcp-tokens` 貼上 client 的重新導向 URI，`POST /auth/oauth-clients` 代為註冊並回傳 client_id（同一 URI 一律回同一個 ID，所有人共用）；之後走一般 OAuth + PKCE。`/oauth/token` 也接受 HTTP Basic 帶 client_id，密鑰忽略 |

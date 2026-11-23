@@ -35,12 +35,11 @@ def google_enabled(client, admin_token):
         "allowed_email_domains": [DOMAIN],
         "google_auto_activate": True,
         "google_auto_link": True,
-        "google_admin_emails": [f"boss@{DOMAIN}"],
     })
     assert res.status_code == 200, res.text
     yield
     keys = ("google_login_enabled", "google_client_id", "allowed_email_domains",
-            "google_auto_activate", "google_auto_link", "google_admin_emails")
+            "google_auto_activate", "google_auto_link")
     client.put("/api/admin/settings", headers=_headers(admin_token),
                json={**{k: original[k] for k in keys}, "google_client_secret": ""})
 
@@ -213,17 +212,27 @@ def test_mcp_inactive_account_is_refused(live_server, client, admin_token, oauth
     assert res.status_code == 403 and "尚未開通" in res.text
 
 
-def test_admin_login_with_google(live_server, client, google_enabled, monkeypatch):
-    fragment = _fragment(_google_login(live_server, monkeypatch, "admin", _claims(f"boss@{DOMAIN}")))
-    users = client.get("/api/admin/users", headers=_headers(fragment["google_token"]))
-    assert users.status_code == 200
+def test_admin_login_with_google(live_server, client, admin_token, google_enabled, monkeypatch):
+    email = f"boss-{uuid.uuid4().hex[:6]}@{DOMAIN}"
+    claims = _claims(email)
 
-    fragment = _fragment(_google_login(live_server, monkeypatch, "admin", _claims(f"staff@{DOMAIN}")))
-    assert "google_error" in fragment and "google_token" not in fragment
+    # 沒有帳號：不會順手建帳號
+    fragment = _fragment(_google_login(live_server, monkeypatch, "admin", claims))
+    assert "google_error" in fragment and _user(client, admin_token, email) is None
+
+    # 有帳號但不是管理員
+    _fragment(_google_login(live_server, monkeypatch, "user", claims))
+    fragment = _fragment(_google_login(live_server, monkeypatch, "admin", claims))
+    assert "管理後台權限" in fragment["google_error"]
+
+    user_id = _user(client, admin_token, email)["id"]
+    client.patch(f"/api/admin/users/{user_id}/admin", headers=_headers(admin_token), json={"is_admin": True})
+    fragment = _fragment(_google_login(live_server, monkeypatch, "admin", claims))
+    assert client.get("/api/admin/users", headers=_headers(fragment["google_token"])).status_code == 200
 
 
 def test_disabled_google_login(client):
-    assert client.get("/oauth/google/status").json() == {"enabled": False, "admin_enabled": False}
+    assert client.get("/oauth/google/status").json() == {"enabled": False}
     res = client.get("/oauth/google/start", params={"flow": "user"}, follow_redirects=False)
     assert res.status_code == 302 and "google_error" in res.headers["location"]
 
@@ -233,7 +242,7 @@ def test_client_secret_is_write_only(client, admin_token, google_enabled):
     assert data["secrets"] == {"google_client_secret": True}
     assert "google-secret" not in str(data)
     assert data["google_redirect_uri"].endswith("/oauth/google/callback")
-    assert client.get("/oauth/google/status").json() == {"enabled": True, "admin_enabled": True}
+    assert client.get("/oauth/google/status").json() == {"enabled": True}
 
     # 不帶 secret 的更新不會清掉它
     client.put("/api/admin/settings", headers=_headers(admin_token), json={"google_auto_link": True})

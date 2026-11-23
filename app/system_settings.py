@@ -18,7 +18,6 @@ from app.security import decrypt_secret, encrypt_secret
 QUERY_EXECUTION_MODES = ("edge", "server")
 
 _DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 @dataclass(frozen=True)
@@ -115,8 +114,6 @@ SETTINGS: dict[str, Any] = {
     "google_auto_activate": _BoolSetting(default=True),
     # 同 email 的既有帳號（還沒綁過 Google）是否自動綁定。關閉時這種人會被擋下，請他用帳密登入。
     "google_auto_link": _BoolSetting(default=True),
-    # 可以用 Google 登入管理後台的 email。ADMIN_SECRET 永遠可用，不受這裡影響。
-    "google_admin_emails": _ListSetting(_EMAIL_RE, "email"),
 }
 
 # 機密設定：加密後存在同一張表，只能寫入、API 永不回傳明文，畫面只看得到「已設定」。

@@ -85,7 +85,8 @@ def issue_credential_jwt(payload: dict, expires_at: datetime | None = None) -> s
     return jwt.encode(data, _get_secret(), algorithm=JWT_ALGORITHM)
 
 
-def issue_admin_jwt() -> str:
+def issue_admin_jwt(user_id: str | None = None, email: str | None = None) -> str:
+    """用管理員帳號（帳密或 Google）登入時帶上是誰；用 ADMIN_SECRET 登入則兩者皆無。"""
     now = datetime.now(timezone.utc)
     payload = {
         "role": "admin",
@@ -93,7 +94,19 @@ def issue_admin_jwt() -> str:
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(hours=1)).timestamp()),
     }
+    if user_id:
+        payload["sub"] = user_id
+        payload["email"] = email
     return jwt.encode(payload, _get_secret(), algorithm=JWT_ALGORITHM)
+
+
+def admin_login_denial(user) -> str | None:
+    """管理員帳號登入（帳密與 Google 共用）的權限檢查，不能登入時回傳原因。"""
+    if not user.is_admin:
+        return "此帳號沒有管理後台權限"
+    if not user.is_active:
+        return "帳號已停用，請聯絡其他管理員"
+    return None
 
 
 def issue_user_jwt(user_id: str, email: str) -> str:

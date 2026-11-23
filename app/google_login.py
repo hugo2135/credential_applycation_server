@@ -38,7 +38,6 @@ class GoogleConfig:
     allowed_domains: list[str]
     auto_activate: bool
     auto_link: bool
-    admin_emails: list[str]
 
 
 def load_config(db: Session) -> GoogleConfig | None:
@@ -57,7 +56,6 @@ def load_config(db: Session) -> GoogleConfig | None:
         allowed_domains=domains,
         auto_activate=get_setting(db, "google_auto_activate"),
         auto_link=get_setting(db, "google_auto_link"),
-        admin_emails=get_setting(db, "google_admin_emails"),
     )
 
 
@@ -181,12 +179,13 @@ def validate_claims(config: GoogleConfig, id_token: str, nonce: str) -> dict:
     return claims
 
 
-def resolve_user(db: Session, config: GoogleConfig, claims: dict) -> tuple[User, bool]:
+def resolve_user(db: Session, config: GoogleConfig, claims: dict, *, create: bool = True) -> tuple[User, bool]:
     """依 Google 帳號找出（或建立）使用者，回傳 (user, 這次是否新綁定既有帳號)。呼叫端負責檢查 is_active。
 
     順序：sub 找到 → 直接登入；沒有再用 email 找 → 還沒綁過就綁定（要開自動綁定），
     綁的是別的 sub 就拒絕（通常是離職者的 email 被重新分配）；都找不到 → 建立新帳號。
     綁定只寫 google_sub，不動原帳號任何其他欄位（包括是否開通）。
+    `create=False` 給管理後台登入用：管理員一定是既有帳號，找不到就拒絕，不順手建帳號。
     """
     sub = str(claims["sub"])
     email = claims["email"]
@@ -205,6 +204,8 @@ def resolve_user(db: Session, config: GoogleConfig, claims: dict) -> tuple[User,
         db.commit()
         return user, True
 
+    if not create:
+        raise GoogleLoginError(f"{email} 沒有管理後台權限")
     user = User(
         email=email,
         # 不會被用到（有 google_sub 時帳密登入一律拒絕），只是欄位不可為空；隨機值確保
@@ -219,7 +220,3 @@ def resolve_user(db: Session, config: GoogleConfig, claims: dict) -> tuple[User,
     db.refresh(user)
     return user, False
 
-
-def check_admin(config: GoogleConfig, claims: dict) -> None:
-    if claims["email"].lower() not in config.admin_emails:
-        raise GoogleLoginError(f"{claims['email']} 沒有管理後台權限")

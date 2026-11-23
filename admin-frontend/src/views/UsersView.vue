@@ -33,6 +33,7 @@
       <el-table-column label="Email" min-width="200">
         <template #default="{ row }">
           {{ row.email }}
+          <el-tag v-if="row.is_admin" size="small" type="warning" style="margin-left: 6px">管理員</el-tag>
           <el-tag v-if="row.google_linked" size="small" effect="plain" style="margin-left: 6px">Google</el-tag>
         </template>
       </el-table-column>
@@ -121,6 +122,20 @@
           </el-form-item>
         </el-form>
         <el-button type="primary" :loading="settingsDialog.saving" @click="saveActivate">儲存</el-button>
+      </el-tab-pane>
+
+      <el-tab-pane label="管理員權限" name="admin-role">
+        <p style="color: #666; margin-bottom: 16px; font-size: 14px">
+          具備管理員權限的帳號可以用自己的帳密或 Google 登入管理後台（帳號需為開通狀態）。
+          ADMIN_SECRET 不受影響，仍然可以登入。
+        </p>
+        <el-switch
+          :model-value="settingsDialog.user?.is_admin ?? false"
+          :loading="adminRoleSaving"
+          active-text="管理員"
+          inactive-text="一般使用者"
+          @change="(v: string | number | boolean) => setAdminRole(Boolean(v))"
+        />
       </el-tab-pane>
 
       <el-tab-pane label="Azure AD 憑證" name="credentials">
@@ -373,6 +388,7 @@ interface User {
   is_locked: boolean
   query_execution: QueryExecution
   google_linked: boolean
+  is_admin: boolean
 }
 type QueryExecution = 'edge' | 'server'
 interface Config { id: string; name: string }
@@ -678,6 +694,24 @@ async function unlockUser() {
     await load()
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail ?? '解鎖失敗')
+  }
+}
+
+const adminRoleSaving = ref(false)
+
+async function setAdminRole(isAdmin: boolean) {
+  const user = settingsDialog.value.user
+  if (!user) return
+  adminRoleSaving.value = true
+  try {
+    const { data } = await http.patch(`/users/${user.id}/admin`, { is_admin: isAdmin })
+    user.is_admin = isAdmin
+    ElMessage.success(data.message)
+    await load()
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.detail ?? '更新失敗')
+  } finally {
+    adminRoleSaving.value = false
   }
 }
 

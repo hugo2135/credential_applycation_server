@@ -25,7 +25,14 @@ from app.model_versions import (
 )
 from app.models import AccessLog, Bookmark, PersonalAccessToken, User, PbiConfig, ModelChunk, UserPbiConfig
 from app.query_check import check_user_configs, link_check_dict, reset_checks
-from app.security import MAX_LOGIN_ATTEMPTS, encrypt_secret, issue_admin_jwt, verify_admin_jwt
+from app.security import (
+    MAX_LOGIN_ATTEMPTS,
+    admin_login_denial,
+    authenticate_user,
+    encrypt_secret,
+    issue_admin_jwt,
+    verify_admin_jwt,
+)
 from app.routers.oauth import _issuer
 from app.system_settings import QUERY_EXECUTION_MODES, get_all_settings, secret_status, update_settings
 from scripts.chunk_model import parse_model
@@ -52,12 +59,36 @@ class AdminLoginResponse(BaseModel):
     expires_in: int
 
 
+class AdminPasswordLoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
 @router.post("/login", response_model=AdminLoginResponse)
 def admin_login(body: AdminLoginRequest):
+    """ADMIN_SECRET 登入。永遠保留：新部署還沒有任何管理員帳號、或 Google 設定壞掉時的備援，
+    第一位管理員也是靠它登入後到使用者管理勾選的。"""
     bootstrap = os.getenv("ADMIN_SECRET", "")
     if not _secrets.compare_digest(body.secret, bootstrap):
         raise HTTPException(status_code=401, detail="Invalid admin secret")
     return AdminLoginResponse(access_token=issue_admin_jwt(), expires_in=3600)
+
+
+@router.post("/login/password", response_model=AdminLoginResponse)
+def admin_password_login(body: AdminPasswordLoginRequest, db: Session = Depends(get_db)):
+    """管理員帳號登入：一般使用者帳號 + is_admin。跟使用者登入共用 authenticate_user，
+    所以錯誤鎖定、「已改用 Google 登入」的規則都一樣。"""
+    user, status_ = authenticate_user(db, body.email, body.password)
+    if status_ == "locked":
+        raise HTTPException(status_code=403, detail="帳號已被鎖定，請聯絡其他管理員解鎖")
+    if status_ == "google":
+        raise HTTPException(status_code=403, detail="此帳號已改用 Google 登入，請點「用 Google 登入」")
+    if status_ != "ok" or not user:
+        raise HTTPException(status_code=401, detail="帳號或密碼錯誤")
+    denial = admin_login_denial(user)
+    if denial:
+        raise HTTPException(status_code=403, detail=denial)
+    return AdminLoginResponse(access_token=issue_admin_jwt(str(user.id), user.email), expires_in=3600)
 
 
 # ── 使用者管理 ─────────────────────────────────────────────────────────────
@@ -100,6 +131,28 @@ def list_users(_=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
         }
         for u in users
     ]
+
+
+class AdminRoleRequest(BaseModel):
+    is_admin: bool
+
+
+@router.patch("/users/{user_id}/admin")
+def set_admin_role(
+    user_id: str,
+    body: AdminRoleRequest,
+    payload: dict = Depends(_require_admin_jwt),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="找不到使用者")
+    # 不讓管理員拿掉自己的權限，避免手滑把自己鎖在外面（真的要拿掉請另一位管理員或用 ADMIN_SECRET）
+    if not body.is_admin and payload.get("sub") == user.id:
+        raise HTTPException(status_code=400, detail="不能移除自己的管理員權限")
+    user.is_admin = body.is_admin
+    db.commit()
+    return {"message": f"已{'授予' if body.is_admin else '移除'} {user.email} 管理員權限"}
 
 
 @router.delete("/users/{user_id}/google-link")

@@ -109,10 +109,6 @@
               Google 登入。關閉時這種人會被擋下，請他繼續用帳密登入。
             </div>
           </el-form-item>
-          <el-form-item label="可用 Google 登入後台的 email">
-            <TagInput v-model="form.google_admin_emails" placeholder="輸入 email 後按 Enter" />
-            <div class="hint">留空則管理後台不顯示 Google 登入。ADMIN_SECRET 永遠可用，不受影響。</div>
-          </el-form-item>
           <el-form-item>
             <el-button type="primary" :loading="saving" :disabled="!dirty" @click="save">儲存</el-button>
             <el-button :disabled="!dirty" @click="reset">還原</el-button>
@@ -141,7 +137,6 @@ interface Settings {
   google_client_id: string
   google_auto_activate: boolean
   google_auto_link: boolean
-  google_admin_emails: string[]
 }
 interface SettingsResponse {
   values: Settings
@@ -166,7 +161,6 @@ const form = ref<Settings>({
   google_client_id: '',
   google_auto_activate: true,
   google_auto_link: true,
-  google_admin_emails: [],
 })
 const counts = ref<Record<QueryExecution, number>>({ edge: 0, server: 0 })
 const secrets = ref({ google_client_secret: false })

@@ -2,7 +2,7 @@
   <template v-if="visible">
     <!-- 整頁導向（不是 fetch）：要讓瀏覽器帶著 state cookie 跳去 Google 再回來 -->
     <a class="google-btn" :href="`/oauth/google/start?flow=${flow}`">{{ label }}</a>
-    <div class="divider">或使用{{ flow === 'admin' ? ' Admin Secret' : '帳號密碼' }}</div>
+    <div class="divider">或使用帳號密碼</div>
   </template>
 </template>
 
@@ -12,8 +12,8 @@ import axios from 'axios'
 
 const props = defineProps<{ flow: 'user' | 'admin'; label?: string }>()
 
-const status = ref({ enabled: false, admin_enabled: false })
-const visible = computed(() => (props.flow === 'admin' ? status.value.admin_enabled : status.value.enabled))
+const status = ref({ enabled: false })
+const visible = computed(() => status.value.enabled)
 const label = computed(() => props.label ?? '用 Google 登入')
 
 onMounted(async () => {

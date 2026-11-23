@@ -7,7 +7,7 @@
 
 一個 callback 服務三個入口（flow）：
   user  → 使用者網頁登入，成功導回 /login#google_token=...（SPA 從 fragment 取出存起來）
-  admin → 管理後台登入，成功導回 /admin/login#google_token=...
+  admin → 管理後台登入（限 is_admin 的既有帳號，不建帳號），成功導回 /admin/login#google_token=...
   mcp   → MCP 授權頁，成功直接發 authorization code 導回 MCP client
 token 放 URL fragment 而不是 query string：fragment 不會送到伺服器，不會出現在任何存取 log。
 """
@@ -23,7 +23,6 @@ from app.database import get_db
 from app.google_login import (
     GoogleLoginError,
     authorization_url,
-    check_admin,
     fetch_id_token,
     issue_flow_state,
     load_config,
@@ -39,7 +38,7 @@ from app.routers.oauth import (
     render_authorize_page,
     validate_authorize_request,
 )
-from app.security import issue_admin_jwt, issue_user_jwt
+from app.security import admin_login_denial, issue_admin_jwt, issue_user_jwt
 
 router = APIRouter(prefix="/oauth/google", tags=["google-login"])
 
@@ -70,8 +69,7 @@ def _mcp_error_page(db: Session, params: dict, error: str) -> HTMLResponse:
 @router.get("/status")
 def google_login_status(db: Session = Depends(get_db)):
     """登入頁用來決定要不要顯示「用 Google 登入」按鈕。"""
-    config = load_config(db)
-    return {"enabled": config is not None, "admin_enabled": bool(config and config.admin_emails)}
+    return {"enabled": load_config(db) is not None}
 
 
 @router.get("/start")
@@ -145,11 +143,12 @@ def _finish(db: Session, flow: str, params: dict, code: str | None, error: str |
         config = require_config(db)
         claims = validate_claims(config, fetch_id_token(config, code, _callback_url()), nonce)
 
+        user, linked = resolve_user(db, config, claims, create=flow != "admin")
         if flow == "admin":
-            check_admin(config, claims)
-            return _to_login_page("admin", google_token=issue_admin_jwt())
-
-        user, linked = resolve_user(db, config, claims)
+            denial = admin_login_denial(user)
+            if denial:
+                raise GoogleLoginError(denial)
+            return _to_login_page("admin", google_token=issue_admin_jwt(str(user.id), user.email))
     except GoogleLoginError as e:
         if flow == "mcp":
             return _mcp_error_page(db, params, str(e))
