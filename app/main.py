@@ -13,7 +13,7 @@ from sqlalchemy import text
 from app.access_log import set_mcp_request_context
 from app.database import engine, Base, SessionLocal
 from app.models import AccessLog, AccessTicket
-from app.routers import auth, credential, admin, oauth, ticket
+from app.routers import auth, credential, admin, google, oauth, ticket
 from app.routers import mcp as mcp_router
 
 _raw_ips = os.getenv("ALLOWED_IPS", "")
@@ -79,6 +79,9 @@ with engine.connect() as _conn:
         "ALTER TABLE access_logs ADD COLUMN query_text TEXT",
         "ALTER TABLE access_tickets ADD COLUMN query_text TEXT",
         "ALTER TABLE access_logs ADD COLUMN duration_ms INTEGER",
+        # SQLite 的 ADD COLUMN 不能帶 UNIQUE，唯一性改用 index 保證
+        "ALTER TABLE users ADD COLUMN google_sub TEXT",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_google_sub ON users (google_sub)",
     ]:
         try:
             _conn.execute(text(_stmt))
@@ -149,7 +152,7 @@ async def lifespan(_: FastAPI):
 
 
 # 這個版號要跟 git tag 一致，改版時兩邊一起改（見 CLAUDE.md「版本管理」）。
-app = FastAPI(title="PBI Credential 申請程式", version="2.1", lifespan=lifespan)
+app = FastAPI(title="PBI Credential 申請程式", version="3.0", lifespan=lifespan)
 
 
 # OAuth/MCP 這幾條路徑本來就要給不特定第三方（使用者的瀏覽器、Claude 的伺服器）連，
@@ -157,6 +160,7 @@ app = FastAPI(title="PBI Credential 申請程式", version="2.1", lifespan=lifes
 # 其餘路徑（含 /admin/*、/auth/*）維持原本「僅限內網」的設計，不在這個排除清單內。
 # /api/ticket/ 也要豁免：那是給使用者機器／沙盒上的查詢腳本呼叫的，不可能在內網。
 # 安全性靠 ticket 本身（單次使用、短效（預設 300 秒）、只存 hash），不是靠 IP。
+# Google 登入的 callback（/oauth/google/）也因此落在豁免範圍內，理由見 app/routers/google.py。
 _IP_WHITELIST_EXEMPT_PREFIXES = ("/oauth/", "/.well-known/", "/mcp", "/api/ticket/")
 
 
@@ -186,6 +190,7 @@ app.include_router(auth.router)
 app.include_router(credential.router)
 app.include_router(admin.router)
 app.include_router(oauth.router)
+app.include_router(google.router)
 app.include_router(ticket.router)
 
 

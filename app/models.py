@@ -49,6 +49,10 @@ class User(Base):
     # "server" = 呼叫 run_query 由 server 代查。設在使用者層級，管理員可以先拿自己的帳號
     # 測 server 模式，再分批切換，不會一切換就讓所有人一起查不了。
     query_execution = Column(String, default="edge", nullable=False)
+    # 綁定的 Google 帳號 ID（id_token 的 sub）。不用 email 綁定：Workspace 的 email 會改名，
+    # 離職者的 email 也可能重新分配給新同事，用 email 連結會讓新同事直接繼承前一個人的帳號。
+    # 有值時帳密登入一律拒絕（password_hash 原樣保留，管理員解除綁定後原密碼恢復可用）。
+    google_sub = Column(String, unique=True, nullable=True)
 
 
 class UserPbiConfig(Base):
@@ -204,9 +208,11 @@ class AccessLog(Base):
 class SystemSetting(Base):
     """管理員在 /admin/settings 調整的系統參數（key-value，值存 JSON）。
 
-    只放非機密設定。之後 Azure AD 代管用的管理 app 憑證刻意放 .env 不放這裡：
+    原則上只放非機密設定。之後 Azure AD 代管用的管理 app 憑證刻意放 .env 不放這裡：
     那組憑證能在租戶裡建立／修改 SP，做成網頁可改會讓管理後台密碼外洩的影響範圍
-    從這套系統擴大到整個租戶。讀取與預設值見 app/system_settings.py。"""
+    從這套系統擴大到整個租戶。唯一例外是 Google 登入的 client secret（AES-GCM 加密後
+    存在這裡、API 永不回傳）：外洩頂多讓人冒用我們的 app 名義發起登入，Google 仍只會
+    對帳號本人簽發 id_token，影響範圍遠小於 Azure 那組。讀取與預設值見 app/system_settings.py。"""
     __tablename__ = "system_settings"
 
     key = Column(String, primary_key=True)

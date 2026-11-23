@@ -3,7 +3,7 @@ import binascii
 import html
 import os
 from datetime import datetime, timedelta
-from urllib.parse import unquote
+from urllib.parse import unquote, urlencode
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.google_login import load_config as load_google_config
 from app.models import OAuthAuthorizationCode, OAuthClient, OAuthRefreshToken, User
 from app.security import (
     authenticate_user,
@@ -90,27 +91,35 @@ def register_client(body: RegisterClientRequest, db: Session = Depends(get_db)):
 
 # ── Authorize (login + consent) ─────────────────────────────────────────────
 
-def _render_authorize_page(
-    *, client: OAuthClient, error: str | None,
+def render_authorize_page(
+    db: Session, *, client: OAuthClient, error: str | None,
     response_type: str, client_id: str, redirect_uri: str,
     code_challenge: str, code_challenge_method: str, state: str, scope: str,
 ) -> str:
     client_name = html.escape(client.client_name or client.client_id)
     error_html = f'<p style="color:#c0392b">{html.escape(error)}</p>' if error else ""
+    params = {
+        "response_type": response_type,
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "code_challenge": code_challenge,
+        "code_challenge_method": code_challenge_method,
+        "state": state,
+        "scope": scope,
+    }
     hidden_fields = "".join(
-        f'<input type="hidden" name="{k}" value="{html.escape(v)}">'
-        for k, v in {
-            "response_type": response_type,
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "code_challenge": code_challenge,
-            "code_challenge_method": code_challenge_method,
-            "state": state,
-            "scope": scope,
-        }.items()
+        f'<input type="hidden" name="{k}" value="{html.escape(v)}">' for k, v in params.items()
     )
+    google_html = ""
+    if load_google_config(db):
+        # 原本這次 OAuth 請求的參數整包帶過去，Google 登入回來後才接得回同一個授權流程
+        google_url = html.escape(f"/oauth/google/start?{urlencode({'flow': 'mcp', **params})}")
+        google_html = f"""<a class="google" href="{google_url}">用 Google 登入並授權</a>
+<p class="hint">第一次使用會自動建立帳號。</p>
+<div class="divider">或使用帳號密碼</div>"""
     return f"""<!DOCTYPE html>
 <html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>授權要求</title>
 <style>
 body {{ font-family: system-ui, sans-serif; max-width: 420px; margin: 60px auto; padding: 0 16px; color: #303133; }}
@@ -119,11 +128,18 @@ label {{ display: block; margin-top: 12px; font-size: 14px; }}
 input[type=email], input[type=password] {{ width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; }}
 button {{ margin-top: 20px; padding: 8px 20px; margin-right: 8px; }}
 .deny {{ background: none; border: 1px solid #ccc; }}
+.google {{ display: block; margin-top: 20px; padding: 10px; text-align: center; border: 1px solid #dadce0;
+  border-radius: 4px; color: #3c4043; text-decoration: none; font-weight: 500; }}
+.google:hover {{ background: #f8f9fa; }}
+.hint {{ font-size: 12px; color: #909399; margin: 6px 0 0; }}
+.divider {{ margin: 24px 0 4px; font-size: 12px; color: #909399; text-align: center; }}
+.register {{ margin-top: 24px; font-size: 13px; color: #666; }}
 </style></head>
 <body>
 <h1>{client_name} 想要存取你的 PBI 語意模型資料</h1>
 <p style="font-size:13px;color:#666">請使用你在 PBI Credential 申請程式的帳號登入並同意授權。</p>
 {error_html}
+{google_html}
 <form method="post" action="/oauth/authorize">
 {hidden_fields}
 <label>Email<input type="email" name="email" required></label>
@@ -131,7 +147,42 @@ button {{ margin-top: 20px; padding: 8px 20px; margin-right: 8px; }}
 <button type="submit" name="action" value="approve">登入並授權</button>
 <button type="submit" name="action" value="deny" class="deny">拒絕</button>
 </form>
+<p class="register">還沒有帳號？<a href="/register" target="_blank" rel="noopener">註冊</a>
+（需在公司網路內，註冊後等待管理員開通，再回到這一頁登入）</p>
 </body></html>"""
+
+
+def validate_authorize_request(
+    db: Session, *, response_type: str, client_id: str, redirect_uri: str, code_challenge_method: str,
+) -> OAuthClient:
+    if response_type != "code":
+        raise HTTPException(status_code=400, detail="僅支援 response_type=code")
+    if code_challenge_method != "S256":
+        raise HTTPException(status_code=400, detail="僅支援 code_challenge_method=S256")
+    client = db.query(OAuthClient).filter(OAuthClient.client_id == client_id).first()
+    if not client:
+        raise HTTPException(status_code=400, detail="未知的 client_id")
+    if redirect_uri not in client.redirect_uris:
+        raise HTTPException(status_code=400, detail="redirect_uri 未在註冊清單中")
+    return client
+
+
+def issue_authorization_code(
+    db: Session, *, client_id: str, user: User, redirect_uri: str,
+    code_challenge: str, code_challenge_method: str,
+) -> str:
+    code = generate_authorization_code()
+    db.add(OAuthAuthorizationCode(
+        code=code,
+        client_id=client_id,
+        user_id=user.id,
+        redirect_uri=redirect_uri,
+        code_challenge=code_challenge,
+        code_challenge_method=code_challenge_method,
+        expires_at=datetime.utcnow() + timedelta(seconds=AUTH_CODE_TTL_SECONDS),
+    ))
+    db.commit()
+    return code
 
 
 @router.get("/oauth/authorize", response_class=HTMLResponse)
@@ -145,18 +196,12 @@ def authorize_page(
     scope: str = Query(""),
     db: Session = Depends(get_db),
 ):
-    if response_type != "code":
-        raise HTTPException(status_code=400, detail="僅支援 response_type=code")
-    if code_challenge_method != "S256":
-        raise HTTPException(status_code=400, detail="僅支援 code_challenge_method=S256")
-    client = db.query(OAuthClient).filter(OAuthClient.client_id == client_id).first()
-    if not client:
-        raise HTTPException(status_code=400, detail="未知的 client_id")
-    if redirect_uri not in client.redirect_uris:
-        raise HTTPException(status_code=400, detail="redirect_uri 未在註冊清單中")
-
-    return _render_authorize_page(
-        client=client, error=None,
+    client = validate_authorize_request(
+        db, response_type=response_type, client_id=client_id,
+        redirect_uri=redirect_uri, code_challenge_method=code_challenge_method,
+    )
+    return render_authorize_page(
+        db, client=client, error=None,
         response_type=response_type, client_id=client_id, redirect_uri=redirect_uri,
         code_challenge=code_challenge, code_challenge_method=code_challenge_method,
         state=state, scope=scope,
@@ -184,49 +229,31 @@ def authorize_submit(
     if action == "deny":
         return RedirectResponse(f"{redirect_uri}?error=access_denied&state={state}", status_code=302)
 
-    user, status_ = authenticate_user(db, email, password)
-    if status_ == "locked":
+    def page_with_error(error: str, status_code: int) -> HTMLResponse:
         return HTMLResponse(
-            _render_authorize_page(
-                client=client, error="帳號已被鎖定，請聯絡管理員解鎖",
+            render_authorize_page(
+                db, client=client, error=error,
                 response_type=response_type, client_id=client_id, redirect_uri=redirect_uri,
                 code_challenge=code_challenge, code_challenge_method=code_challenge_method,
                 state=state, scope=scope,
             ),
-            status_code=403,
-        )
-    if status_ != "ok" or not user:
-        return HTMLResponse(
-            _render_authorize_page(
-                client=client, error="帳號或密碼錯誤",
-                response_type=response_type, client_id=client_id, redirect_uri=redirect_uri,
-                code_challenge=code_challenge, code_challenge_method=code_challenge_method,
-                state=state, scope=scope,
-            ),
-            status_code=401,
-        )
-    if not user.is_active:
-        return HTMLResponse(
-            _render_authorize_page(
-                client=client, error="帳號尚未開通，請聯絡管理員",
-                response_type=response_type, client_id=client_id, redirect_uri=redirect_uri,
-                code_challenge=code_challenge, code_challenge_method=code_challenge_method,
-                state=state, scope=scope,
-            ),
-            status_code=403,
+            status_code=status_code,
         )
 
-    code = generate_authorization_code()
-    db.add(OAuthAuthorizationCode(
-        code=code,
-        client_id=client_id,
-        user_id=user.id,
-        redirect_uri=redirect_uri,
-        code_challenge=code_challenge,
-        code_challenge_method=code_challenge_method,
-        expires_at=datetime.utcnow() + timedelta(seconds=AUTH_CODE_TTL_SECONDS),
-    ))
-    db.commit()
+    user, status_ = authenticate_user(db, email, password)
+    if status_ == "locked":
+        return page_with_error("帳號已被鎖定，請聯絡管理員解鎖", 403)
+    if status_ == "google":
+        return page_with_error("此帳號已改用 Google 登入，請點「用 Google 登入並授權」", 403)
+    if status_ != "ok" or not user:
+        return page_with_error("帳號或密碼錯誤", 401)
+    if not user.is_active:
+        return page_with_error("帳號尚未開通，請聯絡管理員", 403)
+
+    code = issue_authorization_code(
+        db, client_id=client_id, user=user, redirect_uri=redirect_uri,
+        code_challenge=code_challenge, code_challenge_method=code_challenge_method,
+    )
     return RedirectResponse(f"{redirect_uri}?code={code}&state={state}", status_code=302)
 
 

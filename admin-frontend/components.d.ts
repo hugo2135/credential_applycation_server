@@ -58,6 +58,7 @@ declare module 'vue' {
     ElUpload: typeof import('element-plus/es')['ElUpload']
     FilterProfilesEditor: typeof import('./src/components/pbi/FilterProfilesEditor.vue')['default']
     FilterRulesEditor: typeof import('./src/components/pbi/FilterRulesEditor.vue')['default']
+    GoogleLoginButton: typeof import('./src/components/GoogleLoginButton.vue')['default']
     QueryModesEditor: typeof import('./src/components/pbi/QueryModesEditor.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']

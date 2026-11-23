@@ -23,9 +23,9 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 
 | 對象 | 方式 |
 |------|------|
-| 管理員 SPA | POST /api/admin/login（ADMIN_SECRET） → 1 hr HS256 JWT，Bearer |
-| 使用者 SPA | POST /auth/login（帳密） → user session JWT，Bearer |
-| MCP connector | OAuth 2.1 + PKCE（`/oauth/authorize` 沿用使用者帳密登入）→ 1 hr access JWT + 90 天 refresh token（每次使用輪換，只存 hash） |
+| 管理員 SPA | POST /api/admin/login（ADMIN_SECRET） → 1 hr HS256 JWT，Bearer。或 Google 登入（email 在 `google_admin_emails` 內）；ADMIN_SECRET 永遠可用，是新部署／Google 設定壞掉時的備援 |
+| 使用者 SPA | POST /auth/login（帳密） → user session JWT，Bearer。或 Google 登入 |
+| MCP connector | OAuth 2.1 + PKCE（`/oauth/authorize` 沿用使用者帳密登入，或用 Google 登入）→ 1 hr access JWT + 90 天 refresh token（每次使用輪換，只存 hash） |
 | MCP connector（支援 OAuth 但不做 DCR，要手動填用戶端 ID，如 Gemini 網頁版） | 使用者在 `/mcp-tokens` 貼上 client 的重新導向 URI，`POST /auth/oauth-clients` 代為註冊並回傳 client_id（同一 URI 一律回同一個 ID，所有人共用）；之後走一般 OAuth + PKCE。`/oauth/token` 也接受 HTTP Basic 帶 client_id，密鑰忽略 |
 | MCP connector（不支援 OAuth，如 Antigravity） | 使用者在 `/mcp-tokens` 自助產生 Personal Access Token（`pat_` 開頭），貼進該 client 設定當固定 Bearer，無到期時間，只能撤銷 |
 | Skill API（legacy） | Authorization: Bearer \<PBI_MASK_KEY\>（SHA-256 hash 存 DB） |
@@ -37,13 +37,20 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 - `client_secret` 以 AES-256-GCM 加密存 DB，key 衍生自 `SERVER_JWT_SECRET`。
 - PBI_MASK_KEY 明文只在產生時回傳一次，DB 只存 SHA-256 hash；OAuth refresh token、MCP Personal Access Token（`personal_access_tokens` 表）比照辦理，只存 hash。`mcp.py` 的 `_JwtTokenVerifier` 驗證時先試 OAuth JWT，失敗再退回查 PAT hash——兩種 token 都能通過 `/mcp` 的身份驗證。
 - **查詢有兩種執行方式**（v2.0），依使用者設定 `User.query_execution`：`edge`（預設）由呼叫端拿 ticket 直接打 Power BI executeQueries；`server` 由 MCP tool `run_query` 代查（`app/server_query.py`）。早期版本也讓 server 代跑過查詢，後來拿掉，因為當時在 MCP tool 裡用同步網路呼叫，並發時卡住整個 event loop（MCP tool 沒有 FastAPI 那種自動 thread pool offload）。所以 server 查詢有硬規則：打 Power BI **一律 `httpx.AsyncClient`**、MSAL 換 token 丟 `anyio.to_thread.run_sync`、同時查詢數用 `CapacityLimiter` 限流、整段含排隊有 timeout、回傳列數有上限，而且 **await 期間不握 DB session**（`run_query` 先讀完值、關 session，查完再開新 session 寫 log）。兩種模式互斥：`server` 使用者呼叫 `get_query_ticket` 會被拒、`edge` 使用者呼叫 `run_query` 也會被拒，拒絕訊息會指向另一個 tool。模式刻意設在**使用者層級**而不是 PBI 設定層級——管理員可以先拿自己帳號測，再分批切換，不會一切換就全部人查不了。legacy `/api/token` 不看這個設定。
-- **系統設定**（`app/system_settings.py`、`SystemSetting` 表、`/admin/settings`）：key-value，值存 JSON，每個 key 在 `SETTINGS` 裡定義預設值與驗證範圍，DB 沒那一列就用預設值（新增設定不用 migration），每次現讀、改完立即生效。目前只有伺服器查詢的並行數／列數上限／timeout 與新使用者預設查詢方式。**只放非機密設定**——之後 Azure AD 代管的管理 app 憑證要放 `.env`，不能做成網頁可改（管理後台密碼外洩時影響範圍會擴大到整個租戶的 SP）。
+- **系統設定**（`app/system_settings.py`、`SystemSetting` 表、`/admin/settings`）：key-value，值存 JSON，每個 key 在 `SETTINGS` 裡定義預設值與驗證範圍，DB 沒那一列就用預設值（新增設定不用 migration），每次現讀、改完立即生效。目前有伺服器查詢的並行數／列數上限／timeout、新使用者預設查詢方式，以及 v3.0 的允許網域與 Google 登入設定。**原則上只放非機密設定**——之後 Azure AD 代管的管理 app 憑證要放 `.env`，不能做成網頁可改（管理後台密碼外洩時影響範圍會擴大到整個租戶的 SP）。唯一例外是 Google client secret（見下方「Google 登入」）。
 - MCP tool **不回傳 access token，只回傳一次性 ticket**（`get_query_ticket`，短效、單次使用、`access_tickets` 表只存 hash），由呼叫端的查詢腳本自己打 `POST /api/ticket/redeem` 兌換。動機是實測發現舊的 `get_powerbi_token` 會讓有效一小時的 Power BI 憑證完整進入對話上下文——tool 回傳值本身記一次，client 端把它 `Write` 成檔案時再記一次，而且還會落地到使用者的專案資料夾。**`access_tickets` 刻意不存 access token**：跟 Azure AD 換 token 是在 redeem 當下才做，所以那張表任何時候都不含可直接使用的憑證。MSAL 那個同步阻塞呼叫移到 redeem 端點後也不再需要 `anyio.to_thread.run_sync`——一般 FastAPI 端點本來就跑在 thread pool。
 - `/api/ticket/` 必須列在 `main.py` 的 `_IP_WHITELIST_EXEMPT_PREFIXES`：那是給使用者機器／沙盒上的腳本呼叫的，不可能在內網，安全性靠 ticket 本身而不是 IP。另外 skill 端的沙盒除了 `api.powerbi.com` 之外，還要把 `SITE_DOMAIN` 加進 Claude 的 network egress 白名單才能兌換（見 `docs/skill-integration.md`）。
 - `User.client_secret_expires_at` 是管理員手動填的 Azure AD secret 到期日（選填）。Azure 的 client secret 最長 24 個月且到期時不會主動通知，症狀只是使用者突然查不了、錯誤訊息看不出原因，所以 `/admin/users` 會在剩 30 天內或已過期時標紅/標黃。之後若真的去串 Microsoft Graph，可以改成從 application 的 `passwordCredentials.endDateTime` 自動同步，欄位不用動。
 - `acquire_powerbi_token()`（`credential.py`）每次呼叫都重建 `ConfidentialClientApplication`，MSAL 內建的 token cache 因此沒作用；已知但暫緩優化，見函式內 TODO 註記。
 - OAuth client 一律走 Dynamic Client Registration + PKCE（public client，不核發 client_secret）。
-- `/auth/login`、`/oauth/authorize` 的登入共用 `security.authenticate_user()`，累積 5 次密碼錯誤鎖定帳號（`User.failed_login_attempts`），只能由管理員在 `/admin/users` 解鎖，沒有自動過期解鎖。兩個入口共用同一組計數，其中一邊被鎖另一邊也會被鎖。
+- `/auth/login`、`/oauth/authorize` 的登入共用 `security.authenticate_user()`，累積 5 次密碼錯誤鎖定帳號（`User.failed_login_attempts`），只能由管理員在 `/admin/users` 解鎖，沒有自動過期解鎖。兩個入口共用同一組計數，其中一邊被鎖另一邊也會被鎖。已綁定 Google 的帳號回傳 `"google"` 狀態，帳密登入一律拒絕並明講「已改用 Google 登入」。
+- **Google 登入**（v3.0，`app/google_login.py` 核心、`app/routers/google.py` 路由，設定在 `/admin/settings` 的「登入與註冊」Tab）：
+  - OIDC authorization code flow，scope 只要 `openid email`。一個 callback `/oauth/google/callback` 服務三個入口（`flow` = user／admin／mcp），全部放 `/oauth/google/` 底下是為了落在 IP 白名單豁免範圍（打 callback 的是使用者瀏覽器，不是 Google 伺服器，所以不需要也不該放行 Google 的 IP）；user／admin 拿到的 session JWT 之後打 `/auth/*`、`/api/admin/*` 仍受白名單限制。
+  - 跳去 Google 前的狀態（state、nonce、MCP 原始授權參數）放在簽章過的 cookie（`google_login_state`，path `/oauth/google`），不開資料表。成功後 token 用 URL **fragment** 帶回 SPA（`/login#google_token=...`），不放 query string，免得進 log。
+  - id_token **不驗簽章**：是伺服器透過 TLS 直接跟 Google token endpoint 拿的，OIDC Core 3.1.3.7 允許以 TLS 取代；其他 claim（iss/aud/exp/nonce/email_verified）照驗。**網域檢查看 `hd` claim，不能只看 email 網域**——用公司 email 註冊的「個人」Google 帳號沒有 `hd`，離職後仍能登入。授權 URL 的 `hd` 參數只是 UI 提示，不算檢查。
+  - 帳號以 `User.google_sub`（id_token 的 `sub`）連結，**不用 email**：email 會改名、離職者的 email 會重新分配，用 email 連結會讓新同事繼承前一個人的帳號。順序：sub 找到 → 登入；否則 email 找到且未綁定 → 自動綁定（`google_auto_link`），已綁別的 sub → 拒絕交給管理員；都沒有 → 建立帳號，`google_auto_activate` 決定是否直接開通（只在建立當下，之後不碰 `is_active`，停用的人重新登入不會復活）。綁定**只寫 `google_sub`**，不動原帳號其他欄位（含開通狀態、`password_hash`）——管理員在 `/admin/users` 解除綁定（`DELETE /users/{id}/google-link`）後原密碼恢復可用。
+  - 網域清單 `allowed_email_domains` 帳密註冊與 Google 共用；空清單時帳密註冊不限制（舊行為、DB 沒值時沿用 `ALLOWED_EMAIL_DOMAINS`），Google 登入則視為未設定、整個停用——Google 會自動開通，不能對所有 Google 帳號開放。
+  - Google client secret 是系統設定裡唯一的機密：`SECRET_SETTINGS`，AES-GCM 加密存在 `system_settings` 表，API 只回 `secrets.google_client_secret: bool`。允許放網頁的理由見 `models.SystemSetting` docstring（跟 Azure 管理 app 憑證的風險等級不同）。
 - `PbiConfig.filters` 是管理員在 `/admin/pbi-configs` 維護的篩選規則（JSON 陣列），透過 `get_model_detail` 交給 skill 端，取代原本 skill 本機 `filters/*.json` 的設計，格式與比對邏輯見 `docs/skill-integration.md`。
 - 裸路徑 `/mcp`（沒有尾斜線）**不能**用 HTTP 307 轉址到 `/mcp/` 處理——部分 MCP client（例如 Gemini）跟隨轉址重新發送請求時不會保留 `Authorization` header，會導致認證失敗。`main.py` 的 `_McpTrailingSlashFix` 改成在 ASGI 層、Starlette Router 判斷路由之前，直接把路徑內部改寫成 `/mcp/`，同一個請求處理完，client 端完全不會看到任何轉址；這個 wrapper 必須包住整個 `app`（不能只包 `/mcp` 掛載的 sub-app），因為 Router 判斷要不要進到 Mount 這一步，發生在 sub-app 被呼叫之前。
 - 存取歷史（`access_logs` 表）在三個既有身份驗證點各自補一行寫入（`auth.py` 的 `_require_user`、`mcp.py` 的 `_JwtTokenVerifier`、`credential.py` 的 `_resolve_user`），共用 `app/access_log.py` 的 `record_access()`，只記錄驗證成功的請求。例外是 `/api/ticket/redeem`：失敗也記（`AccessLog.error` 放原因，null 代表成功），讓管理員分辨「兌換失敗」和「請求根本沒送到」；但查無此 ticket 不記，因為端點不需登入，記了等於讓任何人灌 DB。只留 90 天，`main.py` 的 lifespan 開一個背景 task 每天清一次舊資料，沒有另外掛排程服務。
@@ -129,7 +136,8 @@ app/
   query_check.py   查詢權限檢測（用使用者 SP 跑最小查詢 + 錯誤翻譯）
   model_versions.py 語意模型版本：配號、目前提供哪一版、刪減項目另存新版本 + DAX 引用分析
   server_query.py  伺服器查詢模式（run_query 的實作：async 打 Power BI、限流、timeout、列數上限）
-  system_settings.py 系統設定（/admin/settings）的預設值、驗證、讀寫
+  system_settings.py 系統設定（/admin/settings）的預設值、驗證、讀寫（含加密的機密設定）
+  google_login.py  Google 登入核心：設定、state cookie、id_token 驗證、帳號以 sub 綁定
   models.py        SQLAlchemy ORM（含 OAuth 三張表 + personal_access_tokens + access_logs + access_tickets）
   database.py      SQLAlchemy 設定
   routers/
@@ -137,6 +145,7 @@ app/
     credential.py  /api（Skill legacy），也提供 acquire_powerbi_token 給 ticket redeem 用
     admin.py       /api/admin（管理員）
     oauth.py       /oauth、/.well-known（OAuth 2.1 authorization server）
+    google.py      /oauth/google（Google 登入 start/callback/status，user／admin／mcp 三個入口共用）
     mcp.py         /mcp（MCP server + tools：list_models/get_model_detail(mode_id?)/get_query_ticket/run_query/list_bookmarks/save_bookmark/delete_bookmark）
     ticket.py      /api/ticket/redeem（一次性 ticket 換 Power BI access token，給 skill 腳本呼叫）
 admin-frontend/    Vue 3 SPA（Element Plus + Pinia）
@@ -166,7 +175,7 @@ docs/
                         GET /api/admin/pbi-configs/{id}/schema（預設 MCP 提供中的版本，可用 ?version= 改看別版）。畫面上的中文名稱可隨意改，JSON key 是 skill 契約不能動
 
 /admin/access-logs      存取歷史查詢／匯出（管理員）
-/admin/settings         系統設定（管理員，側欄底部、登出鈕上方；Tab：伺服器查詢，之後加 Azure AD 代管）
+/admin/settings         系統設定（管理員，側欄底部、登出鈕上方；Tab：伺服器查詢、登入與註冊（允許網域＋Google 登入），之後加 Azure AD 代管）
 ```
 
 管理員與使用者的 JWT 過期時，`admin-frontend/src/api/http.ts` 的 axios response 攔截器會在收到 401 時清除 token 並導回對應登入頁（管理員 → `/admin/login`）。**修改前端後必須執行 `npm run build --prefix admin-frontend` 重新產生 `dist/`**，否則 FastAPI 會繼續 serve 舊的靜態檔案，導致行為與原始碼不一致（例如導向錯誤的登入頁）。

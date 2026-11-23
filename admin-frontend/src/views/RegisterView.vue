@@ -4,6 +4,8 @@
       <template #header>
         <span style="font-size: 18px; font-weight: bold">PBI Credential 帳號申請</span>
       </template>
+      <!-- 用 Google 登入第一次就會自動建立帳號，不用另外申請 -->
+      <GoogleLoginButton flow="user" label="用 Google 帳號直接建立並登入" />
       <el-form @submit.prevent="handleRegister" label-width="80px">
         <el-form-item label="Email">
           <el-input v-model="form.email" type="email" placeholder="your@email.com" autocomplete="username" />
@@ -32,6 +34,7 @@ import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import axios from 'axios'
+import GoogleLoginButton from '@/components/GoogleLoginButton.vue'
 
 const router = useRouter()
 const loading = ref(false)

@@ -4,6 +4,7 @@
       <template #header>
         <span style="font-size: 18px; font-weight: bold">PBI Admin 登入</span>
       </template>
+      <GoogleLoginButton flow="admin" />
       <el-form @submit.prevent="handleLogin">
         <el-form-item label="Admin Secret">
           <el-input
@@ -25,16 +26,29 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
+import GoogleLoginButton from '@/components/GoogleLoginButton.vue'
+import { consumeGoogleFragment } from '@/utils/googleLogin'
 
 const router = useRouter()
 const auth = useAuthStore()
 
 const secret = ref('')
 const loading = ref(false)
+
+onMounted(() => {
+  const result = consumeGoogleFragment()
+  if (!result) return
+  if (result.error || !result.token) {
+    ElMessage.error({ message: result.error ?? 'Google 登入失敗', duration: 6000 })
+    return
+  }
+  auth.setToken(result.token)
+  router.push('/admin/users')
+})
 
 async function handleLogin() {
   if (!secret.value) return

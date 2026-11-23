@@ -10,10 +10,15 @@ export const useUserAuthStore = defineStore('userAuth', () => {
 
   async function login(emailInput: string, password: string) {
     const res = await axios.post('/auth/login', { email: emailInput, password })
-    token.value = res.data.access_token
-    email.value = emailInput
-    sessionStorage.setItem('user_token', token.value!)
-    sessionStorage.setItem('user_email', emailInput)
+    setSession(res.data.access_token, emailInput)
+  }
+
+  // Google 登入由後端導回時直接帶著 token，不經過 /auth/login
+  function setSession(newToken: string, newEmail: string) {
+    token.value = newToken
+    email.value = newEmail
+    sessionStorage.setItem('user_token', newToken)
+    sessionStorage.setItem('user_email', newEmail)
   }
 
   function logout() {
@@ -23,5 +28,5 @@ export const useUserAuthStore = defineStore('userAuth', () => {
     sessionStorage.removeItem('user_email')
   }
 
-  return { token, email, isAuthenticated, login, logout }
+  return { token, email, isAuthenticated, login, setSession, logout }
 })

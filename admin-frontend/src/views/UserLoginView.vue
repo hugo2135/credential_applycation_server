@@ -4,6 +4,7 @@
       <template #header>
         <span style="font-size: 18px; font-weight: bold">PBI Credential 使用者登入</span>
       </template>
+      <GoogleLoginButton flow="user" />
       <el-form @submit.prevent="handleLogin" label-width="70px">
         <el-form-item label="Email">
           <el-input v-model="form.email" type="email" placeholder="your@email.com" autocomplete="username" />
@@ -25,15 +26,35 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useUserAuthStore } from '@/stores/userAuth'
+import GoogleLoginButton from '@/components/GoogleLoginButton.vue'
+import { consumeGoogleFragment } from '@/utils/googleLogin'
 
 const router = useRouter()
 const auth = useUserAuthStore()
 const loading = ref(false)
 const form = reactive({ email: '', password: '' })
+
+onMounted(async () => {
+  const result = consumeGoogleFragment()
+  if (!result) return
+  if (result.error || !result.token) {
+    ElMessage.error({ message: result.error ?? 'Google 登入失敗', duration: 6000 })
+    return
+  }
+  auth.setSession(result.token, result.email ?? '')
+  if (result.linked) {
+    await ElMessageBox.alert(
+      `這個 Google 帳號已綁定到既有帳號 ${result.email}。原本的密碼已經失效，之後請使用「用 Google 登入」。`,
+      '已綁定 Google 帳號',
+      { confirmButtonText: '繼續' },
+    ).catch(() => {})
+  }
+  router.push('/dashboard')
+})
 
 async function handleLogin() {
   if (!form.email || !form.password) return

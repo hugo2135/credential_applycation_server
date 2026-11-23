@@ -32,15 +32,20 @@ def verify_password(plain: str, hashed: str) -> bool:
 def authenticate_user(db: Session, email: str, password: str):
     """帳密登入共用邏輯（/auth/login、/oauth/authorize 都要用），含失敗鎖定。
 
-    回傳 (user, status)：status 為 "ok" / "invalid" / "locked"。
+    回傳 (user, status)：status 為 "ok" / "invalid" / "locked" / "google"。
     帳號累積 MAX_LOGIN_ATTEMPTS 次密碼錯誤後鎖定，只能由管理員解鎖
     （不設自動過期解鎖，避免被反覆嘗試繞過）。成功登入會重置計數。
+    "google" = 已綁定 Google 帳號，只能用 Google 登入；呼叫端要明講，不然使用者只會看到
+    「帳號或密碼錯誤」以為自己記錯。這等於透露帳號存在，但註冊時打已存在的 email 本來就會
+    回 409，不算新增的資訊外洩。
     """
     from app.models import User  # 延後 import，避免 security.py 對 models.py 產生模組層級依賴
 
     user = db.query(User).filter(User.email == email).first()
     if not user:
         return None, "invalid"
+    if user.google_sub:
+        return None, "google"
     if user.failed_login_attempts >= MAX_LOGIN_ATTEMPTS:
         return None, "locked"
     if not verify_password(password, user.password_hash):

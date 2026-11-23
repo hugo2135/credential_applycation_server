@@ -11,6 +11,8 @@
 
 **為什麼要換成 MCP**：Claude Apps 的 skill 執行環境是「一個對話一個 sandbox」，本機寫入的 `PBI_MASK_KEY` 設定檔每次對話結束就消失，使用者得每次重新申請、貼上金鑰。MCP connector 的 OAuth token 由 Anthropic 的 connector 機制在**帳號層級**保管，跟對話 sandbox 無關，連過一次之後每次對話都能直接用。Claude Code 因為不是 sandbox 環境，理論上兩種方式都能跑，但我們決定新舊 skill 一律統一改用 MCP，不維護兩條並行路徑。
 
+> **v3.0（Google 登入）skill 端不需要任何修改。** MCP tools、`POST /api/ticket/redeem`、legacy REST API 都沒有變動；新增的只是使用者在 OAuth 授權頁多了「用 Google 登入」的選項。
+
 ---
 
 ## 前置條件
@@ -24,13 +26,15 @@
 
 完成以上步驟後，使用者才能在 MCP 的 OAuth 登入畫面成功登入。**不需要再手動申請/複製/貼上 PBI_MASK_KEY**——這步驟被 OAuth 連線取代了。
 
+**管理員啟用 Google 登入時（v3.0）**，第 1、2 步可以省略：使用者直接在 MCP 授權頁按「用 Google 登入並授權」，第一次登入會自動建立並開通帳號（限管理員設定的公司網域），同一步就連上 MCP。但第 3、4 步仍然要等管理員做完才查得到資料——在那之前 `list_models` 會是空的、查詢會失敗，skill 遇到這種情況請引導使用者聯絡管理員指派模型與設定憑證。
+
 ---
 
 ## 使用者怎麼連線
 
 1. 使用者在 Claude（claude.ai 或 Claude Code）的 Settings → Connectors 加入這個 MCP server 的網址：`https://<SITE_DOMAIN>/mcp`
 2. Claude 會自動打 `/oauth/register` 註冊自己成為 OAuth client，然後導向 `/oauth/authorize`
-3. 使用者在該頁面用**申請程式的帳密**（跟登入 `/dashboard` 一樣）登入，並同意授權
+3. 使用者在該頁面用**申請程式的帳密**（跟登入 `/dashboard` 一樣）登入，並同意授權；管理員有啟用 Google 登入的話，也可以按「用 Google 登入並授權」。已用帳密註冊的人第一次用 Google 登入會綁定到原帳號，之後只能用 Google 登入
 4. Claude 保存 access token（1 小時效期）與 refresh token（90 天效期，每次刷新會輪換），之後每次對話自動使用，使用者不需要再做任何事
 
 ### 要使用者手動填「OAuth 用戶端 ID」的 MCP client（例如 Gemini 網頁版）

@@ -30,7 +30,12 @@
 
     <el-table :data="users" v-loading="loading" border @selection-change="selected = $event">
       <el-table-column type="selection" width="42" />
-      <el-table-column prop="email" label="Email" min-width="200" />
+      <el-table-column label="Email" min-width="200">
+        <template #default="{ row }">
+          {{ row.email }}
+          <el-tag v-if="row.google_linked" size="small" effect="plain" style="margin-left: 6px">Google</el-tag>
+        </template>
+      </el-table-column>
       <el-table-column label="狀態" width="100" align="center">
         <template #default="{ row }">
           <el-tag :type="row.is_active ? 'success' : 'danger'">
@@ -269,6 +274,19 @@
         <el-button type="warning" @click="unlockUser">🔒 解鎖</el-button>
       </el-tab-pane>
 
+      <el-tab-pane v-if="settingsDialog.user?.google_linked" label="Google 綁定" name="google">
+        <p style="color: #666; margin-bottom: 16px; font-size: 14px">
+          此帳號已綁定 Google 帳號，只能用 Google 登入。解除綁定後，原本用帳密註冊的帳號恢復用原密碼登入；
+          由 Google 建立的帳號則沒有可用密碼，下次用 Google 登入時會重新綁定。
+          通常用在 email 被重新分配給新同事、或綁錯帳號的情況。
+        </p>
+        <el-popconfirm title="確定解除 Google 綁定？" @confirm="unlinkGoogle">
+          <template #reference>
+            <el-button type="warning" plain>解除 Google 綁定</el-button>
+          </template>
+        </el-popconfirm>
+      </el-tab-pane>
+
       <el-tab-pane label="PAT 管理" name="pat">
         <p style="color: #666; margin-bottom: 16px; font-size: 14px">
           使用者自助產生、給不支援 OAuth 的 MCP client 用的 token。管理員只能查看與撤銷，看不到明文。
@@ -354,6 +372,7 @@ interface User {
   expires_at: string | null
   is_locked: boolean
   query_execution: QueryExecution
+  google_linked: boolean
 }
 type QueryExecution = 'edge' | 'server'
 interface Config { id: string; name: string }
@@ -659,6 +678,19 @@ async function unlockUser() {
     await load()
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail ?? '解鎖失敗')
+  }
+}
+
+async function unlinkGoogle() {
+  const user = settingsDialog.value.user
+  if (!user) return
+  try {
+    const { data } = await http.delete(`/users/${user.id}/google-link`)
+    ElMessage.success(data.message)
+    settingsDialog.value.visible = false
+    await load()
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.detail ?? '解除綁定失敗')
   }
 }
 

@@ -1,4 +1,3 @@
-import os
 from typing import Optional
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request, Security, status
@@ -20,9 +19,9 @@ from app.security import (
 from app.system_settings import get_setting
 
 
-def _check_email_domain(email: str):
-    raw = os.getenv("ALLOWED_EMAIL_DOMAINS", "")
-    allowed = {d.strip().lower() for d in raw.split(",") if d.strip()}
+def _check_email_domain(db: Session, email: str):
+    # 網域清單在 /admin/settings 設定（跟 Google 登入共用），還沒設過時沿用 ALLOWED_EMAIL_DOMAINS
+    allowed = get_setting(db, "allowed_email_domains")
     if not allowed:
         return
     domain = email.split("@")[-1].lower()
@@ -85,7 +84,7 @@ class McpTokenCreateRequest(BaseModel):
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 def register(body: RegisterRequest, db: Session = Depends(get_db)):
-    _check_email_domain(body.email)
+    _check_email_domain(db, body.email)
     if db.query(User).filter(User.email == body.email).first():
         raise HTTPException(status_code=409, detail="Email 已被使用")
     user = User(
@@ -104,6 +103,8 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     user, status_ = authenticate_user(db, body.email, body.password)
     if status_ == "locked":
         raise HTTPException(status_code=403, detail="帳號已被鎖定，請聯絡管理員解鎖")
+    if status_ == "google":
+        raise HTTPException(status_code=403, detail="此帳號已改用 Google 登入，請點「用 Google 登入」")
     if status_ != "ok" or not user:
         raise HTTPException(status_code=401, detail="帳號或密碼錯誤")
     return TokenResponse(access_token=issue_user_jwt(str(user.id), user.email))

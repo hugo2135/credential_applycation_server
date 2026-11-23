@@ -26,7 +26,8 @@ from app.model_versions import (
 from app.models import AccessLog, Bookmark, PersonalAccessToken, User, PbiConfig, ModelChunk, UserPbiConfig
 from app.query_check import check_user_configs, link_check_dict, reset_checks
 from app.security import MAX_LOGIN_ATTEMPTS, encrypt_secret, issue_admin_jwt, verify_admin_jwt
-from app.system_settings import QUERY_EXECUTION_MODES, get_all_settings, update_settings
+from app.routers.oauth import _issuer
+from app.system_settings import QUERY_EXECUTION_MODES, get_all_settings, secret_status, update_settings
 from scripts.chunk_model import parse_model
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -95,9 +96,22 @@ def list_users(_=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
             "created_at": u.created_at,
             "is_locked": u.failed_login_attempts >= MAX_LOGIN_ATTEMPTS,
             "query_execution": u.query_execution,
+            "google_linked": u.google_sub is not None,
         }
         for u in users
     ]
+
+
+@router.delete("/users/{user_id}/google-link")
+def unlink_google(user_id: str, _=Depends(_require_admin_jwt), db: Session = Depends(get_db)):
+    """解除 Google 綁定。綁定時沒動過原密碼，解除後原本的帳密登入恢復可用（Google 建立的
+    帳號原本就沒有可用密碼）。典型用途：email 被重新分配給新同事、或綁錯帳號時由管理員處理。"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="找不到使用者")
+    user.google_sub = None
+    db.commit()
+    return {"message": f"已解除 {user.email} 的 Google 綁定"}
 
 
 @router.patch("/users/activate")
@@ -441,7 +455,11 @@ def _settings_response(db: Session) -> dict:
     )
     return {
         "values": get_all_settings(db),
+        # 機密設定只回「有沒有設定」，明文永不回傳
+        "secrets": secret_status(db),
         "query_execution_counts": {mode: counts.get(mode, 0) for mode in QUERY_EXECUTION_MODES},
+        # 要填進 Google Cloud Console「已授權的重新導向 URI」的值，畫面直接顯示方便複製
+        "google_redirect_uri": f"{_issuer()}/oauth/google/callback",
     }
 
 

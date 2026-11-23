@@ -48,6 +48,77 @@
           </el-form-item>
         </el-form>
       </el-tab-pane>
+
+      <el-tab-pane label="登入與註冊" name="login">
+        <el-form label-width="180px" style="max-width: 720px">
+          <el-form-item label="允許的 email 網域">
+            <TagInput v-model="form.allowed_email_domains" placeholder="例如 company.com，輸入後按 Enter" />
+            <div class="hint">
+              帳密註冊與 Google 登入共用。留空時帳密註冊不限網域，但 Google 登入會停用
+              （Google 登入會自動開通帳號，不能對所有 Google 帳號開放）。
+            </div>
+          </el-form-item>
+
+          <el-divider content-position="left">Google 登入</el-divider>
+
+          <el-alert type="info" :closable="false" style="margin-bottom: 20px">
+            <template #title>
+              在 Google Cloud Console 建立「網頁應用程式」類型的 OAuth 用戶端（同意畫面選 Internal、scope 只需 openid 與
+              email），把下面的重新導向 URI 填進「已授權的重新導向 URI」，再把拿到的用戶端 ID 與密鑰填在這裡。
+            </template>
+          </el-alert>
+
+          <el-form-item label="重新導向 URI">
+            <el-input :model-value="googleRedirectUri" readonly>
+              <template #append>
+                <el-button @click="copyRedirectUri">複製</el-button>
+              </template>
+            </el-input>
+            <div class="hint">跟 SITE_DOMAIN 綁在一起；換網域時要到 Google Cloud Console 加上新的 URI。</div>
+          </el-form-item>
+          <el-form-item label="啟用 Google 登入">
+            <el-switch v-model="form.google_login_enabled" />
+            <div v-if="form.google_login_enabled && missingGoogleFields.length" class="hint warn">
+              尚未設定：{{ missingGoogleFields.join('、') }}，登入頁不會出現 Google 按鈕。
+            </div>
+          </el-form-item>
+          <el-form-item label="用戶端 ID">
+            <el-input v-model="form.google_client_id" placeholder="xxxx.apps.googleusercontent.com" />
+          </el-form-item>
+          <el-form-item label="用戶端密鑰">
+            <el-input
+              v-model="googleSecretInput"
+              type="password"
+              show-password
+              autocomplete="new-password"
+              :placeholder="secrets.google_client_secret ? '已設定（留空表示不變）' : '尚未設定'"
+            />
+            <div class="hint">加密儲存，儲存後無法再查看。</div>
+          </el-form-item>
+          <el-form-item label="新帳號自動開通">
+            <el-switch v-model="form.google_auto_activate" />
+            <div class="hint">
+              第一次用 Google 登入時建立的帳號直接開通，在 MCP 授權頁就能一次完成建帳號與連線。其他設定照預設，
+              沒指派模型、沒填 Azure AD 憑證照樣查不了。只在建立當下生效，管理員停用後再登入不會恢復。
+            </div>
+          </el-form-item>
+          <el-form-item label="自動綁定同 email 帳號">
+            <el-switch v-model="form.google_auto_link" />
+            <div class="hint">
+              已用帳密註冊的人第一次用 Google 登入時，自動綁定到原帳號（只綁定，不改原帳號其他設定），之後只能用
+              Google 登入。關閉時這種人會被擋下，請他繼續用帳密登入。
+            </div>
+          </el-form-item>
+          <el-form-item label="可用 Google 登入後台的 email">
+            <TagInput v-model="form.google_admin_emails" placeholder="輸入 email 後按 Enter" />
+            <div class="hint">留空則管理後台不顯示 Google 登入。ADMIN_SECRET 永遠可用，不受影響。</div>
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" :loading="saving" :disabled="!dirty" @click="save">儲存</el-button>
+            <el-button :disabled="!dirty" @click="reset">還原</el-button>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
     </el-tabs>
   </el-card>
 </template>
@@ -57,6 +128,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import http from '@/api/http'
+import TagInput from '@/components/pbi/TagInput.vue'
 
 type QueryExecution = 'edge' | 'server'
 interface Settings {
@@ -64,10 +136,18 @@ interface Settings {
   server_query_max_rows: number
   server_query_timeout_seconds: number
   default_query_execution: QueryExecution
+  allowed_email_domains: string[]
+  google_login_enabled: boolean
+  google_client_id: string
+  google_auto_activate: boolean
+  google_auto_link: boolean
+  google_admin_emails: string[]
 }
 interface SettingsResponse {
   values: Settings
+  secrets: { google_client_secret: boolean }
   query_execution_counts: Record<QueryExecution, number>
+  google_redirect_uri: string
   message?: string
 }
 
@@ -81,19 +161,56 @@ const form = ref<Settings>({
   server_query_max_rows: 1000,
   server_query_timeout_seconds: 60,
   default_query_execution: 'edge',
+  allowed_email_domains: [],
+  google_login_enabled: false,
+  google_client_id: '',
+  google_auto_activate: true,
+  google_auto_link: true,
+  google_admin_emails: [],
 })
 const counts = ref<Record<QueryExecution, number>>({ edge: 0, server: 0 })
+const secrets = ref({ google_client_secret: false })
+const googleRedirectUri = ref('')
+// 密鑰只能寫入：輸入框永遠從空白開始，有輸入才會送出
+const googleSecretInput = ref('')
 
-const dirty = computed(() => !!saved.value && JSON.stringify(form.value) !== JSON.stringify(saved.value))
+const dirty = computed(
+  () => !!saved.value && (JSON.stringify(form.value) !== JSON.stringify(saved.value) || !!googleSecretInput.value),
+)
+
+const missingGoogleFields = computed(() => {
+  const missing = []
+  if (!form.value.google_client_id) missing.push('用戶端 ID')
+  if (!secrets.value.google_client_secret && !googleSecretInput.value) missing.push('用戶端密鑰')
+  if (!form.value.allowed_email_domains.length) missing.push('允許的 email 網域')
+  return missing
+})
+
+function clone(values: Settings): Settings {
+  return JSON.parse(JSON.stringify(values))
+}
 
 function apply(data: SettingsResponse) {
-  saved.value = { ...data.values }
-  form.value = { ...data.values }
+  saved.value = clone(data.values)
+  form.value = clone(data.values)
   counts.value = data.query_execution_counts
+  secrets.value = data.secrets
+  googleRedirectUri.value = data.google_redirect_uri
+  googleSecretInput.value = ''
 }
 
 function reset() {
-  if (saved.value) form.value = { ...saved.value }
+  if (saved.value) form.value = clone(saved.value)
+  googleSecretInput.value = ''
+}
+
+async function copyRedirectUri() {
+  try {
+    await navigator.clipboard.writeText(googleRedirectUri.value)
+    ElMessage.success('已複製')
+  } catch {
+    ElMessage.warning('無法存取剪貼簿，請手動複製')
+  }
 }
 
 async function load() {
@@ -111,7 +228,9 @@ async function load() {
 async function save() {
   saving.value = true
   try {
-    const { data } = await http.put<SettingsResponse>('/settings', form.value)
+    const body: Record<string, unknown> = { ...form.value }
+    if (googleSecretInput.value) body.google_client_secret = googleSecretInput.value
+    const { data } = await http.put<SettingsResponse>('/settings', body)
     apply(data)
     ElMessage.success(data.message ?? '已儲存')
   } catch (e: any) {
@@ -151,5 +270,8 @@ onMounted(load)
   font-size: 12px;
   line-height: 1.6;
   color: #909399;
+}
+.hint.warn {
+  color: #e6a23c;
 }
 </style>
