@@ -421,12 +421,29 @@ def get_mcp_server() -> FastMCP:
         """由伺服器代為執行 DAX 查詢並直接回傳結果（只適用 query_execution 為 "server" 的使用者）。
 
         dax 是完整的 DAX 查詢（EVALUATE ...）。回傳 tables：每個 EVALUATE 一筆，含
-        columns、rows（每列一個 dict，key 是 "Table[Column]" 或量值名稱）、row_count
-        （Power BI 實際回傳的列數）與 truncated。
+        columns、row_count（Power BI 實際回傳的列數）、truncated、truncated_reason 與
+        rows（每列一個 dict，key 是 "Table[Column]" 或量值名稱）。
 
-        **truncated 為 true 代表結果超過伺服器的列數上限（max_rows），只回傳了前面幾列**：
-        請告知使用者結果不完整，並改寫成彙總、加篩選或 TOPN 後再查，不要拿不完整的資料
-        做加總或排名結論。
+        **truncated 為 true 代表只回傳了部分結果**，原因看 truncated_reason：
+        - "max_rows"：超過伺服器的列數上限（max_rows），只回傳了前面幾列，row_count 是總列數。
+        - "powerbi_row_limit"／"powerbi_byte_limit"：超過 Power BI 單次查詢上限（10 萬列或
+          100 萬個值／15MB），Power BI 只回傳了部分資料，row_count 是拿到的列數、不是總數，
+          實際總數更多。
+
+        **遇到截斷時，先告知使用者結果不完整（說明原因與拿到幾列），再詢問使用者是否要
+        改成分批查詢，由使用者決定，不要自行開始分批。** 詢問時必須明確說明：分批會把
+        每一批的資料都放進對話，額外消耗的 token 跟總列數成正比——"max_rows" 時依 row_count
+        估算約需 row_count ÷ max_rows 批；Power BI 上限時總數未知，至少多於 row_count。
+        也可以提供替代做法讓使用者選：改寫成彙總、加篩選或 TOPN 後再查。
+
+        使用者同意分批時，逐批呼叫 run_query：用 WINDOW 依穩定的排序鍵按列的位置切批，
+        每批列數不超過 max_rows（回傳裡有），也不超過 1000000 除以欄數；"powerbi_byte_limit"
+        時再取這次拿到列數的 80% 以內。某一批又被截斷就縮小批次重查那一批；某一批回來的
+        列數少於批次大小代表已查完。含多個 EVALUATE 或 START AT 等無法改寫成分批的查詢，
+        告知使用者無法分批即可。
+
+        在拿到完整資料前，不要拿不完整的資料做加總或排名結論。錯誤訊息是「查詢結果超過
+        Power BI 單次查詢上限」時（Power BI 完全沒給資料），一樣先告知、再詢問是否分批。
 
         查詢失敗時錯誤訊息會說明原因：「DAX 執行錯誤」代表 DAX 本身有問題，請依訊息修正
         後重試；Azure AD／權限相關錯誤則不是 DAX 能解決的，請告知使用者聯絡管理員。

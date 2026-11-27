@@ -117,6 +117,10 @@ async def test_server_user_runs_query_and_ticket_is_refused(
     assert table["columns"] == ["T[a]"]
     assert table["rows"] == ROWS[:2]
     assert table["row_count"] == 3 and table["truncated"] is True
+    assert table["truncated_reason"] == "max_rows"
+    # 截斷標記排在 rows 前面，client 從尾巴截斷過長的回傳時才不會跟著不見
+    keys = list(table)
+    assert keys.index("truncated") < keys.index("rows")
 
     request = fake_powerbi["requests"][0]
     assert "/groups/ws-test/datasets/ds-test/executeQueries" in str(request.url)
@@ -144,6 +148,56 @@ async def test_dax_error_is_returned_to_ai(live_server, client, admin_token, mcp
     assert "DAX 執行錯誤" in result.content[0].text
     assert "Cannot find table 'X'" in result.content[0].text
     assert "Cannot find table" in _run_query_logs(client, admin_token, user_id)[0]["error"]
+
+
+_TARGET = QueryTarget("t", "c", "s", "ws", "ds")
+_LIMITS = QueryLimits(max_concurrency=4, max_rows=10, timeout_seconds=5)
+_ROW_LIMIT_ERROR = {"code": "DatasetExecuteQueriesError", "pbi.error": {"details": [
+    {"code": "DetailsMessage", "detail": {"type": 1, "value": "DaxRowCountNotSupported: More than 100000 rows"}},
+]}}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("body", [
+    # 官方文件沒說錯誤放哪一層，三層都要認得
+    {"error": _ROW_LIMIT_ERROR, "results": [{"tables": [{"rows": ROWS}]}]},
+    {"results": [{"error": _ROW_LIMIT_ERROR, "tables": [{"rows": ROWS}]}]},
+    {"results": [{"tables": [{"rows": ROWS, "error": _ROW_LIMIT_ERROR}]}]},
+])
+async def test_powerbi_row_limit_marks_partial_result_truncated(fake_powerbi, body):
+    fake_powerbi["body"] = body
+    table = (await execute_dax(_TARGET, "EVALUATE T", _LIMITS))["tables"][0]
+    assert table["rows"] == ROWS
+    assert table["truncated"] is True and table["truncated_reason"] == "powerbi_row_limit"
+
+
+@pytest.mark.anyio
+async def test_powerbi_byte_limit_takes_precedence_over_max_rows(fake_powerbi):
+    fake_powerbi["body"] = {"results": [{"tables": [{
+        "rows": ROWS, "error": {"code": "DaxByteCountNotSupported", "message": "over 15MB"},
+    }]}]}
+    limits = QueryLimits(max_concurrency=4, max_rows=2, timeout_seconds=5)
+    table = (await execute_dax(_TARGET, "EVALUATE T", limits))["tables"][0]
+    assert table["rows"] == ROWS[:2]
+    assert table["truncated_reason"] == "powerbi_byte_limit"
+
+
+@pytest.mark.anyio
+async def test_limit_code_inside_row_data_is_not_a_limit(fake_powerbi):
+    rows = [{"T[note]": "DaxRowCountNotSupported"}]
+    fake_powerbi["body"] = {"results": [{"tables": [{"rows": rows}]}]}
+    table = (await execute_dax(_TARGET, "EVALUATE T", _LIMITS))["tables"][0]
+    assert table["truncated"] is False and table["truncated_reason"] is None
+
+
+@pytest.mark.anyio
+async def test_limit_error_with_http_error_is_not_reported_as_dax_error(fake_powerbi):
+    fake_powerbi["status"] = 400
+    fake_powerbi["body"] = {"error": _ROW_LIMIT_ERROR}
+    with pytest.raises(ServerQueryError) as e:
+        await execute_dax(_TARGET, "EVALUATE T", _LIMITS)
+    assert "Power BI 單次查詢上限" in str(e.value)
+    assert "DAX 執行錯誤" not in str(e.value)
 
 
 @pytest.mark.anyio

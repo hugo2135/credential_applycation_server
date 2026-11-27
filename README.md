@@ -86,4 +86,4 @@ npm run dev            # dev: backend :8000 + Vite dev server :5173
 docker compose up -d   # production behind Caddy (ports 80/443 must be reachable for ACME)
 ```
 
-Note: `docker compose up` fails without a populated `.env`, and an empty `SITE_DOMAIN` leaves the Caddy container in a restart loop — create the file first. API docs at `http://localhost:8000/docs`; see `docs/skill-integration.md` for the MCP-first integration guide.
+Note: `docker compose up` fails without a populated `.env`, and an empty `SITE_DOMAIN` leaves the Caddy container in a restart loop — create the file first. API docs at `http://localhost:8000/docs`.

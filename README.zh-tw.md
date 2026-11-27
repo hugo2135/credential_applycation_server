@@ -22,7 +22,7 @@ Vue 3 SPA（同一 origin）
 前端頁面路徑 `/admin/*` 與後端管理 API 路徑 `/api/admin/*` 刻意分開，避免整頁重整／直接輸入網址時，請求被同名後端路由攔截而拿到 JSON 而非 SPA 頁面。
 
 **Skill 端的兩種整合方式**：
-- **MCP（推薦，新開發用這個）**：Claude／其他支援 MCP 的 client 透過 `/mcp` 走 OAuth 連線，不需要使用者手動申請、複製、貼上任何金鑰。詳見 [docs/skill-integration.md](docs/skill-integration.md)。
+- **MCP（推薦，新開發用這個）**：Claude／其他支援 MCP 的 client 透過 `/mcp` 走 OAuth 連線，不需要使用者手動申請、複製、貼上任何金鑰。
 - **REST API + PBI_MASK_KEY（legacy）**：`/api/*` 這組端點仍保留運作，但屬於舊流程，新 skill 開發不建議再串這條路——在 Claude Apps 的 sandbox 環境下，本機寫入的 `PBI_MASK_KEY` 每次對話都會消失，這正是導入 MCP 的原因。
 
 ### 安全設計重點
@@ -124,7 +124,7 @@ python -c "import secrets; print(secrets.token_hex(32))"
 
 Skill 用 `access_token` + `workspace_id` + `dataset_id` 直接對 Power BI Execute Queries API 執行 DAX 查詢。
 
-> ⚠️ 上面這兩支是 **legacy** 端點，新的 skill 整合請改走下方的 MCP。詳見 [docs/skill-integration.md](docs/skill-integration.md)。
+> ⚠️ 上面這兩支是 **legacy** 端點，新的 skill 整合請改走下方的 MCP。
 
 ### OAuth（`/oauth/*`、`/.well-known/*`）— 給 MCP connector 用
 
@@ -148,7 +148,7 @@ Access token 是 1 小時效期的 JWT；refresh token 90 天效期、每次使�
 
 跟 Azure AD 換 token（MSAL 同步阻塞呼叫）發生在 `POST /api/ticket/redeem`，那是一般 FastAPI 端點、自動跑在 thread pool，不會卡住 event loop。`get_query_ticket` 本身只寫一列 DB，不打任何外部網路。（早期版本 `run_dax_query` 直接在 server 端執行查詢＋同步阻塞呼叫，並發量大時會拖垮整個服務，已改為現在這個設計。）
 
-`/mcp` 的 Bearer token 接受兩種：OAuth 核發的 access token（見上方），或使用者自己在 `/mcp-tokens` 產生的 Personal Access Token（`pat_` 開頭，無到期時間，撤銷前一直有效）。後者是給不會自動走 OAuth 流程、需要手動貼上固定 token 的 MCP client 用，詳見 [docs/skill-integration.md](docs/skill-integration.md)。
+`/mcp` 的 Bearer token 接受兩種：OAuth 核發的 access token（見上方），或使用者自己在 `/mcp-tokens` 產生的 Personal Access Token（`pat_` 開頭，無到期時間，撤銷前一直有效）。後者是給不會自動走 OAuth 流程、需要手動貼上固定 token 的 MCP client 用。
 
 ### Ticket 兌換（`/api/ticket/*`）— 給 Skill 的查詢腳本用
 
@@ -156,7 +156,7 @@ Access token 是 1 小時效期的 JWT；refresh token 90 天效期、每次使�
 |------|------|------|------|
 | POST | `/api/ticket/redeem` | ticket 本身 | 用 `get_query_ticket` 發的一次性 ticket 換 Power BI access token（`access_token`/`token_type`/`expires_in`） |
 
-不需要其他身份驗證——ticket 就是憑證（單次使用、短效、DB 只存 hash；效期由 `MCP_TICKET_TTL_SECONDS` 控制，預設 300 秒）。這條路徑在 `main.py` 列為 IP 白名單豁免，因為它是給使用者機器／沙盒上的腳本呼叫的，不可能在內網。設計動機與 Skill 端改法見 [docs/skill-integration.md](docs/skill-integration.md)。
+不需要其他身份驗證——ticket 就是憑證（單次使用、短效、DB 只存 hash；效期由 `MCP_TICKET_TTL_SECONDS` 控制，預設 300 秒）。這條路徑在 `main.py` 列為 IP 白名單豁免，因為它是給使用者機器／沙盒上的腳本呼叫的，不可能在內網。
 
 ### 使用者 API（`/auth/*`）
 
@@ -290,7 +290,7 @@ docker image prune -f
 │   └── chunk_model.py    PBI JSON 解析核心（後端 import + CLI 兩用）
 ├── tests/                pytest 套件（OAuth flow + MCP 協定完整往返測試）
 ├── docs/
-│   └── skill-integration.md  Skill 串接指南（MCP 為主，legacy REST API 為輔）
+│   └── plan.md           初期規劃文件（歷史參考）
 ├── Dockerfile
 ├── docker-compose.yml
 ├── Caddyfile             TLS termination（Let's Encrypt 自動憑證）

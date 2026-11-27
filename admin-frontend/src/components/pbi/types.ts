@@ -1,5 +1,5 @@
 // 這些型別的欄位名稱就是存進 DB、透過 get_model_detail 交給 skill 的 JSON key，
-// 屬於對外契約，畫面上的中文名稱可以隨便改，key 本身不能動（見 docs/skill-integration.md）。
+// 屬於對外契約，畫面上的中文名稱可以隨便改，key 本身不能動。
 
 export interface FilterRule {
   description: string

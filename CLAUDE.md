@@ -36,10 +36,10 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 - `datetime.now(timezone.utc)`：JWT 時間戳**必須**用這個，`utcnow()` 在 UTC+8 環境會讓 exp 提前 7 小時失效。
 - `client_secret` 以 AES-256-GCM 加密存 DB，key 衍生自 `SERVER_JWT_SECRET`。
 - PBI_MASK_KEY 明文只在產生時回傳一次，DB 只存 SHA-256 hash；OAuth refresh token、MCP Personal Access Token（`personal_access_tokens` 表）比照辦理，只存 hash。`mcp.py` 的 `_JwtTokenVerifier` 驗證時先試 OAuth JWT，失敗再退回查 PAT hash——兩種 token 都能通過 `/mcp` 的身份驗證。
-- **查詢有兩種執行方式**（v2.0），依使用者設定 `User.query_execution`：`edge`（預設）由呼叫端拿 ticket 直接打 Power BI executeQueries；`server` 由 MCP tool `run_query` 代查（`app/server_query.py`）。早期版本也讓 server 代跑過查詢，後來拿掉，因為當時在 MCP tool 裡用同步網路呼叫，並發時卡住整個 event loop（MCP tool 沒有 FastAPI 那種自動 thread pool offload）。所以 server 查詢有硬規則：打 Power BI **一律 `httpx.AsyncClient`**、MSAL 換 token 丟 `anyio.to_thread.run_sync`、同時查詢數用 `CapacityLimiter` 限流、整段含排隊有 timeout、回傳列數有上限，而且 **await 期間不握 DB session**（`run_query` 先讀完值、關 session，查完再開新 session 寫 log）。兩種模式互斥：`server` 使用者呼叫 `get_query_ticket` 會被拒、`edge` 使用者呼叫 `run_query` 也會被拒，拒絕訊息會指向另一個 tool。模式刻意設在**使用者層級**而不是 PBI 設定層級——管理員可以先拿自己帳號測，再分批切換，不會一切換就全部人查不了。legacy `/api/token` 不看這個設定。
+- **查詢有兩種執行方式**（v2.0），依使用者設定 `User.query_execution`：`edge`（預設）由呼叫端拿 ticket 直接打 Power BI executeQueries；`server` 由 MCP tool `run_query` 代查（`app/server_query.py`）。早期版本也讓 server 代跑過查詢，後來拿掉，因為當時在 MCP tool 裡用同步網路呼叫，並發時卡住整個 event loop（MCP tool 沒有 FastAPI 那種自動 thread pool offload）。所以 server 查詢有硬規則：打 Power BI **一律 `httpx.AsyncClient`**、MSAL 換 token 丟 `anyio.to_thread.run_sync`、同時查詢數用 `CapacityLimiter` 限流、整段含排隊有 timeout、回傳列數有上限，而且 **await 期間不握 DB session**（`run_query` 先讀完值、關 session，查完再開新 session 寫 log）。兩種模式互斥：`server` 使用者呼叫 `get_query_ticket` 會被拒、`edge` 使用者呼叫 `run_query` 也會被拒，拒絕訊息會指向另一個 tool。超過 Power BI 單次查詢上限時 executeQueries 照樣回 200、只給部分資料，`server_query.py` 掃整個回應（跳過 `rows`）找 `DaxRowCountNotSupported`／`DaxByteCountNotSupported`，標成 `truncated_reason="powerbi_*"` 而不是報成 DAX 錯誤（判斷方式跟 skill 端 edge 模式一致）。伺服器自己不分批重查；任何截斷（含 `max_rows`）由 `run_query` 的 tool 說明要求 AI 先告知、再**問使用者**要不要分批（明講 token 消耗跟總列數成正比），同意後 AI 才用 `WINDOW` 逐批呼叫——分批的每一批都進對話上下文，所以不讓 AI 自行決定。模式刻意設在**使用者層級**而不是 PBI 設定層級——管理員可以先拿自己帳號測，再分批切換，不會一切換就全部人查不了。legacy `/api/token` 不看這個設定。
 - **系統設定**（`app/system_settings.py`、`SystemSetting` 表、`/admin/settings`）：key-value，值存 JSON，每個 key 在 `SETTINGS` 裡定義預設值與驗證範圍，DB 沒那一列就用預設值（新增設定不用 migration），每次現讀、改完立即生效。目前有伺服器查詢的並行數／列數上限／timeout、新使用者預設查詢方式，以及 v3.0 的允許網域與 Google 登入設定。**原則上只放非機密設定**——之後 Azure AD 代管的管理 app 憑證要放 `.env`，不能做成網頁可改（管理後台密碼外洩時影響範圍會擴大到整個租戶的 SP）。唯一例外是 Google client secret（見下方「Google 登入」）。
 - MCP tool **不回傳 access token，只回傳一次性 ticket**（`get_query_ticket`，短效、單次使用、`access_tickets` 表只存 hash），由呼叫端的查詢腳本自己打 `POST /api/ticket/redeem` 兌換。動機是實測發現舊的 `get_powerbi_token` 會讓有效一小時的 Power BI 憑證完整進入對話上下文——tool 回傳值本身記一次，client 端把它 `Write` 成檔案時再記一次，而且還會落地到使用者的專案資料夾。**`access_tickets` 刻意不存 access token**：跟 Azure AD 換 token 是在 redeem 當下才做，所以那張表任何時候都不含可直接使用的憑證。MSAL 那個同步阻塞呼叫移到 redeem 端點後也不再需要 `anyio.to_thread.run_sync`——一般 FastAPI 端點本來就跑在 thread pool。
-- `/api/ticket/` 必須列在 `main.py` 的 `_IP_WHITELIST_EXEMPT_PREFIXES`：那是給使用者機器／沙盒上的腳本呼叫的，不可能在內網，安全性靠 ticket 本身而不是 IP。另外 skill 端的沙盒除了 `api.powerbi.com` 之外，還要把 `SITE_DOMAIN` 加進 Claude 的 network egress 白名單才能兌換（見 `docs/skill-integration.md`）。
+- `/api/ticket/` 必須列在 `main.py` 的 `_IP_WHITELIST_EXEMPT_PREFIXES`：那是給使用者機器／沙盒上的腳本呼叫的，不可能在內網，安全性靠 ticket 本身而不是 IP。另外 skill 端的沙盒除了 `api.powerbi.com` 之外，還要把 `SITE_DOMAIN` 加進 Claude 的 network egress 白名單才能兌換。
 - `User.client_secret_expires_at` 是管理員手動填的 Azure AD secret 到期日（選填）。Azure 的 client secret 最長 24 個月且到期時不會主動通知，症狀只是使用者突然查不了、錯誤訊息看不出原因，所以 `/admin/users` 會在剩 30 天內或已過期時標紅/標黃。之後若真的去串 Microsoft Graph，可以改成從 application 的 `passwordCredentials.endDateTime` 自動同步，欄位不用動。
 - `acquire_powerbi_token()`（`credential.py`）每次呼叫都重建 `ConfidentialClientApplication`，MSAL 內建的 token cache 因此沒作用；已知但暫緩優化，見函式內 TODO 註記。
 - OAuth client 一律走 Dynamic Client Registration + PKCE（public client，不核發 client_secret）。
@@ -51,7 +51,7 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
   - 帳號以 `User.google_sub`（id_token 的 `sub`）連結，**不用 email**：email 會改名、離職者的 email 會重新分配，用 email 連結會讓新同事繼承前一個人的帳號。順序：sub 找到 → 登入；否則 email 找到且未綁定 → 自動綁定（`google_auto_link`），已綁別的 sub → 拒絕交給管理員；都沒有 → 建立帳號，`google_auto_activate` 決定是否直接開通（只在建立當下，之後不碰 `is_active`，停用的人重新登入不會復活）。綁定**只寫 `google_sub`**，不動原帳號其他欄位（含開通狀態、`password_hash`）——管理員在 `/admin/users` 解除綁定（`DELETE /users/{id}/google-link`）後原密碼恢復可用。
   - 網域清單 `allowed_email_domains` 帳密註冊與 Google 共用；空清單時帳密註冊不限制（舊行為、DB 沒值時沿用 `ALLOWED_EMAIL_DOMAINS`），Google 登入則視為未設定、整個停用——Google 會自動開通，不能對所有 Google 帳號開放。
   - Google client secret 是系統設定裡唯一的機密：`SECRET_SETTINGS`，AES-GCM 加密存在 `system_settings` 表，API 只回 `secrets.google_client_secret: bool`。允許放網頁的理由見 `models.SystemSetting` docstring（跟 Azure 管理 app 憑證的風險等級不同）。
-- `PbiConfig.filters` 是管理員在 `/admin/pbi-configs` 維護的篩選規則（JSON 陣列），透過 `get_model_detail` 交給 skill 端，取代原本 skill 本機 `filters/*.json` 的設計，格式與比對邏輯見 `docs/skill-integration.md`。
+- `PbiConfig.filters` 是管理員在 `/admin/pbi-configs` 維護的篩選規則（JSON 陣列），透過 `get_model_detail` 交給 skill 端，取代原本 skill 本機 `filters/*.json` 的設計。
 - 裸路徑 `/mcp`（沒有尾斜線）**不能**用 HTTP 307 轉址到 `/mcp/` 處理——部分 MCP client（例如 Gemini）跟隨轉址重新發送請求時不會保留 `Authorization` header，會導致認證失敗。`main.py` 的 `_McpTrailingSlashFix` 改成在 ASGI 層、Starlette Router 判斷路由之前，直接把路徑內部改寫成 `/mcp/`，同一個請求處理完，client 端完全不會看到任何轉址；這個 wrapper 必須包住整個 `app`（不能只包 `/mcp` 掛載的 sub-app），因為 Router 判斷要不要進到 Mount 這一步，發生在 sub-app 被呼叫之前。
 - 存取歷史（`access_logs` 表）在三個既有身份驗證點各自補一行寫入（`auth.py` 的 `_require_user`、`mcp.py` 的 `_JwtTokenVerifier`、`credential.py` 的 `_resolve_user`），共用 `app/access_log.py` 的 `record_access()`，只記錄驗證成功的請求。例外是 `/api/ticket/redeem`：失敗也記（`AccessLog.error` 放原因，null 代表成功），讓管理員分辨「兌換失敗」和「請求根本沒送到」；但查無此 ticket 不記，因為端點不需登入，記了等於讓任何人灌 DB。只留 90 天，`main.py` 的 lifespan 開一個背景 task 每天清一次舊資料，沒有另外掛排程服務。
 - `mcp.py` 的存取紀錄分兩層：`_JwtTokenVerifier` 每個 HTTP request 都記一筆通用的 `path="/mcp"`（含 `initialize`/`list_tools` 這些協定層呼叫，用來看背景連線活動）；`_log_tool_access()` 額外在每個 tool 各自呼叫，記一筆 `path="/mcp/{tool_name}"`（`run_query` 是查完才記，成功失敗都記，並把 DAX 存進 `AccessLog.query_text`；edge 模式的 `get_query_ticket` 有選填參數 `dax`，存在 `AccessTicket.query_text`，領取與兌換兩筆 log 都會帶——但那是 skill **自行申報**的，token 換出去後實際查了什麼伺服器看不到，可信的「誰查了什麼」只有 server 模式。`dax` 刻意不設必填：舊 skill 會壞，而且必填也擋不了申報假的），才看得出「哪個使用者觸發了哪個功能」。同一次真正的 tool 呼叫因此會有兩筆紀錄，這是刻意的（各自用途不同），不是重複寫入的 bug。tool 紀錄一律用 `_logged_tool_call()` 包住本體、**執行完才寫**：被拒絕（`ToolError`）時 `error` 放原因，並記 `duration_ms`（ticket 兌換同樣有記；其他紀錄寫在身份驗證當下，量不到耗時）。不要再回到「一進 tool 就先記」——那樣被拒絕的呼叫會顯示成成功。 `AccessLog.detail` 放這次操作的對象（目前是 `pbi_config_id`），`get_model_detail`/`get_query_ticket`/ticket redeem 都會帶；`list_models` 沒有特定對象所以留空。查詢是在 client 端直接打 Power BI 的，server 這邊唯一留得下的線索就是這筆紀錄，要跟 Power BI 自己的 activity log 對起來還原「誰查了哪個模型」就靠這欄。
@@ -81,7 +81,7 @@ FastAPI 後端                 Vue 3 SPA（同一 origin）
 | 主版號（`v2.0` → `v3.0`） | 一次重大改版：新功能、新能力，或破壞 skill 端契約的改動 | v2.0 伺服器查詢模式 |
 | 修正號（`v2.0` → `v2.1`） | hotfix：修 bug、效能、文件、管理後台小調整 | |
 
-主版號不再代表「一定破壞契約」，所以**每個主版號都要在 `docs/skill-integration.md` 寫清楚 skill 端要不要改**。「對外契約」指這三個介面：
+主版號不再代表「一定破壞契約」，所以**每個主版號都要跟 skill 開發端講清楚 skill 端要不要改**（跟 skill 端溝通用的文件不放在這個 repo）。「對外契約」指這三個介面：
 
 1. MCP tools（名稱、參數、回傳結構）
 2. `POST /api/ticket/redeem`
@@ -153,7 +153,6 @@ scripts/
   chunk_model.py   離線工具：將原始 PBI JSON 拆分成 relationships + tables
 tests/             pytest（OAuth flow + MCP 協定完整往返測試，跑法見 README）
 docs/
-  skill-integration.md  Skill 串接指南（MCP 為主，legacy REST API 為輔）
   plan.md          初期規劃文件（歷史參考）
 ```
 

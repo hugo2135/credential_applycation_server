@@ -89,18 +89,53 @@ def _error_from_body(error: dict) -> str:
     return "; ".join(messages) or error.get("message") or error.get("code") or ""
 
 
-def _shape_tables(results: list, max_rows: int) -> list[dict]:
+# 超過 Power BI 單次查詢上限時，executeQueries 照樣回 HTTP 200、只給部分資料，錯誤碼藏在
+# 某一層的 error 裡（官方文件沒說哪一層，最外層／單一查詢結果／資料表都有 error 欄位）。
+# 沒有 truncated 之類的欄位，只能靠錯誤碼判斷。
+_POWERBI_LIMIT_CODES = {
+    "DaxRowCountNotSupported": "powerbi_row_limit",   # 超過 10 萬列或 100 萬個值
+    "DaxByteCountNotSupported": "powerbi_byte_limit",  # 超過 15MB
+}
+_LIMIT_DESCRIPTIONS = {
+    "powerbi_row_limit": "10 萬列或 100 萬個值",
+    "powerbi_byte_limit": "15MB",
+}
+
+
+def _find_limit_error(node) -> str | None:
+    """掃整個回應找上限錯誤碼，回傳 truncated_reason。跳過 rows：資料內容剛好含有
+    這個字串時不能誤判。"""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key != "rows" and (reason := _find_limit_error(value)):
+                return reason
+    elif isinstance(node, list):
+        for item in node:
+            if reason := _find_limit_error(item):
+                return reason
+    elif isinstance(node, str):
+        for code, reason in _POWERBI_LIMIT_CODES.items():
+            if code in node:
+                return reason
+    return None
+
+
+def _shape_tables(results: list, max_rows: int, limit_reason: str | None) -> list[dict]:
     tables = []
     for result in results:
-        if result.get("error"):
+        if result.get("error") and not _find_limit_error(result["error"]):
             raise ServerQueryError(f"DAX 執行錯誤：{_error_from_body(result['error']) or result['error']}")
         for table in result.get("tables") or []:
             rows = table.get("rows") or []
+            # Power BI 已經截斷時 row_count 只是拿到的列數、不是總數，原因以 Power BI 為準
+            reason = limit_reason or ("max_rows" if len(rows) > max_rows else None)
+            # rows 放最後：client 端從尾巴截斷過長的回傳時，截斷標記才不會跟著不見
             tables.append({
                 "columns": list(rows[0].keys()) if rows else [],
-                "rows": rows[:max_rows],
                 "row_count": len(rows),
-                "truncated": len(rows) > max_rows,
+                "truncated": reason is not None,
+                "truncated_reason": reason,
+                "rows": rows[:max_rows],
             })
     return tables
 
@@ -145,6 +180,18 @@ async def execute_dax(target: QueryTarget, dax: str, limits: QueryLimits) -> dic
             f"查詢超過 {limits.timeout_seconds} 秒仍未完成，請簡化 DAX（例如先彙總、加篩選或用 TOPN 限制列數）"
         ) from None
 
+    if res.status_code != 200:
+        try:
+            limit_reason = _find_limit_error(res.json())
+        except ValueError:
+            limit_reason = None
+        if limit_reason:
+            # 不是 DAX 寫錯，不能報成「DAX 執行錯誤」讓 AI 去改語法
+            raise ServerQueryError(
+                f"查詢結果超過 Power BI 單次查詢上限（{_LIMIT_DESCRIPTIONS[limit_reason]}），"
+                f"Power BI 沒有回傳資料。請告知使用者，並詢問是否改成分批查詢（會額外消耗 token）："
+                f"{_powerbi_error_detail(res)}"
+            )
     if res.status_code == 400:
         # executeQueries 的 DAX 語法／語意錯誤都是 400，錯誤說明交給 AI 修正
         raise ServerQueryError(f"DAX 執行錯誤：{_powerbi_error_detail(res)}")
@@ -153,7 +200,8 @@ async def execute_dax(target: QueryTarget, dax: str, limits: QueryLimits) -> dic
         raise ServerQueryError(f"{hint}（HTTP {res.status_code}）")
 
     try:
-        results = res.json().get("results") or []
+        body = res.json()
     except ValueError:
         raise ServerQueryError("Power BI 回應格式無法解析") from None
-    return {"tables": _shape_tables(results, limits.max_rows), "max_rows": limits.max_rows}
+    tables = _shape_tables(body.get("results") or [], limits.max_rows, _find_limit_error(body))
+    return {"tables": tables, "max_rows": limits.max_rows}
