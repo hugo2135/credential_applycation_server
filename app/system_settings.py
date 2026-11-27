@@ -98,7 +98,7 @@ SETTINGS: dict[str, Any] = {
     "server_query_max_concurrency": _IntSetting(default=4, min=1, max=32),
     # 每個結果表最多回傳幾列給 AI。結果會整包進入對話上下文，太大會塞爆 context，
     # AI 看到 truncated=true 會自己改成彙總或加篩選。
-    "server_query_max_rows": _IntSetting(default=1000, min=1, max=10000),
+    "server_query_max_rows": _IntSetting(default=1000, min=1, max=100000),
     # 含排隊等待時間。Power BI executeQueries 一般幾秒內回應，超過通常代表 DAX 太重。
     "server_query_timeout_seconds": _IntSetting(default=60, min=5, max=300),
     # 新註冊使用者的查詢方式。既有使用者不受影響，要改請到使用者管理批次切換。

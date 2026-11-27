@@ -28,7 +28,7 @@
             <div class="hint">同時進行中的伺服器查詢數，超過的會排隊。主機記憶體小時不建議調太高。</div>
           </el-form-item>
           <el-form-item label="每個結果最多回傳列數">
-            <el-input-number v-model="form.server_query_max_rows" :min="1" :max="10000" :step="100" />
+            <el-input-number v-model="form.server_query_max_rows" :min="1" :max="100000" :step="100" />
             <div class="hint">結果會整包交給 AI。超過時只回傳前面幾列並標示不完整，AI 會改成彙總或加篩選再查。</div>
           </el-form-item>
           <el-form-item label="查詢逾時（秒）">
